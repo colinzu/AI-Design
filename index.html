@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="AI Design - 想象即设计，创造图片和视频的AI设计工具">
+    <title>AI Design - Just imagine it</title>
+    <link rel="icon" href="assets/images/logo.png" type="image/png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:wght@400;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-content">
+            <div class="header-left">
+                <div class="logo">
+                    <img src="assets/images/logo.png" alt="AI Design" class="logo-icon">
+                    <span>AI Design</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <button class="language-text-btn" id="language-btn" aria-label="Language">
+                    <span id="language-display">English</span>
+                </button>
+                <button class="icon-btn" aria-label="Notifications">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                    </svg>
+                </button>
+                <button class="user-avatar" aria-label="User menu">
+                    <img src="assets/images/avatar.png" alt="User">
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Hero Section -->
+        <section class="hero-section">
+            <div class="hero-container">
+                <!-- Background watermark text -->
+                <div class="hero-bg-text">
+                    <span class="bg-text-seedream">SEEDREAM</span>
+                    <span class="bg-text-version">5.0</span>
+                </div>
+                <!-- Hero image -->
+                <img src="assets/images/hero-banner.png" alt="Seedream 5.0" class="hero-image">
+                <!-- Slogan floats on top of image -->
+                <h1 class="hero-title" data-translate="hero-title">Imagine it. <em>Design</em> it.</h1>
+            </div>
+        </section>
+
+        <!-- Creation Input Section -->
+        <section class="creation-section">
+            <div class="creation-card">
+                <!-- Uploaded Images -->
+                <div class="uploaded-images" id="uploaded-images"></div>
+
+                <!-- Input Area -->
+                <div class="input-area" id="input-area">
+                    <div class="input-editor" id="input-editor" contenteditable="true"
+                        data-placeholder="Enter your Pagess..." data-placeholder-zh="输入你的想法..."></div>
+                </div>
+
+                <!-- Bottom Actions -->
+                <div class="creation-footer">
+                    <div class="footer-left">
+                        <button class="add-btn" id="add-btn">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19" />
+                                <line x1="5" y1="12" x2="19" y2="12" />
+                            </svg>
+                        </button>
+                        <!-- Model Selector: icon + Auto / icon + model name -->
+                        <div class="model-selector" id="model-selector">
+                            <img src="assets/images/Model.svg" alt="Model" class="model-icon-img">
+                            <span class="model-label">Auto</span>
+                        </div>
+                    </div>
+                    <div class="footer-right">
+                        <button class="send-btn" id="send-btn">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2.5">
+                                <line x1="12" y1="19" x2="12" y2="5" />
+                                <polyline points="5 12 12 5 19 12" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tool Categories -->
+        <section class="categories-section">
+            <div class="categories-list">
+                <button class="category-chip">
+                    <span>🎨</span> <span data-translate="category-seedream">Seedream 5.0</span>
+                </button>
+                <button class="category-chip">
+                    <span>🍌</span> <span data-translate="category-nano">Nano Banana Pro</span>
+                </button>
+                <button class="category-chip">
+                    <span>📱</span> <span data-translate="category-social">Social media</span>
+                </button>
+                <button class="category-chip">
+                    <span>🛒</span> <span data-translate="category-ecommerce">E-commerce</span>
+                </button>
+                <button class="category-chip">
+                    <span>📢</span> <span data-translate="category-promotion">Promotion</span>
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <!-- Recents Section -->
+    <section class="recents-section">
+        <h2 class="section-title">Recents</h2>
+        <div class="recents-scroll-container">
+            <!-- New Project - Fixed Position -->
+            <div class="project-card new-project">
+                <div class="new-project-inner">
+                    <div class="new-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                    </div>
+                    <span>New Project</span>
+                </div>
+            </div>
+
+            <!-- Scrollable Project Cards -->
+            <div class="recents-grid" id="recents-grid">
+                <!-- Project Cards -->
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_20_2b683c752d5d7affd5c37af4ef5a294a.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Untitled image</h3>
+                        <p>Just now · 12 Pages</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_40_dd3c4e6c98d7d1cae9e21cececf08a00.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Luxury Campaign Post</h3>
+                        <p>5 hours ago · 2 Pages</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_46_2f7818b49107b10f8f44900446c4927a.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Retro Camera Collage I...</h3>
+                        <p>6 days ago · 3 Pages</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_49_6cc1c4b153db1a9e3d0f6bdc9a2a069d.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>BURGER</h3>
+                        <p>November 9, 2025 · 5 Pages</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_63_f26578fc503c646043b03d2518874c5c.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Untitled image</h3>
+                        <p>November 3, 2025</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_61_39406516453dc61fc04aaac5d7a37537.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Abstract Art Design</h3>
+                        <p>October 28, 2025 · 8 Pages</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_34_a75e35edd49a680597665da6bf14488a.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Neon Portrait</h3>
+                        <p>October 15, 2025 · 4 Pages</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_36_2ad10df92d38f0171ba87ca0d17af081.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Red Sneakers</h3>
+                        <p>October 10, 2025 · 6 Pages</p>
+                    </div>
+                </div>
+
+                <div class="project-card">
+                    <div class="project-thumb">
+                        <img src="assets/images/Inspiration/imgi_43_9559ad4db30640f60aba3f3e2e51ff6c.jpg" alt="">
+                    </div>
+                    <div class="project-info">
+                        <h3>Luxury Watch</h3>
+                        <p>October 5, 2025 · 3 Pages</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Inspiration Section -->
+    <section class="inspiration-section">
+        <h2 class="section-title">Inspiration</h2>
+        <div class="inspiration-tabs">
+            <button class="tab-btn active" data-translate="tab-all">All</button>
+            <button class="tab-btn" data-translate="tab-social">Social Media</button>
+            <button class="tab-btn" data-translate="tab-effects">Effects</button>
+            <button class="tab-btn" data-translate="tab-posters">Posters</button>
+            <button class="tab-btn" data-translate="tab-advertisement">Advertisement</button>
+            <button class="tab-btn" data-translate="tab-brand">Brand</button>
+            <button class="tab-btn" data-translate="tab-cine">Cine Muse</button>
+        </div>
+        <div class="inspiration-grid" id="inspiration-grid">
+            <!-- Generated by JS -->
+        </div>
+    </section>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
