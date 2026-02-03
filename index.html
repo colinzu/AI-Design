@@ -53,7 +53,7 @@
                     <span class="bg-text-version">5.0</span>
                 </div>
                 <!-- Hero image -->
-                <img src="assets/images/hero-banner.png" alt="Seedream 5.0" class="hero-image">
+                <img src="assets/images/hero-banner.png" alt="Seedream 5.0" class="hero-image" fetchpriority="high">
                 <!-- Slogan floats on top of image -->
                 <h1 class="hero-title" data-translate="hero-title">Imagine it. <em>Design</em> it.</h1>
             </div>
@@ -145,7 +145,8 @@
                 <!-- Project Cards -->
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_20_2b683c752d5d7affd5c37af4ef5a294a.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_20_2b683c752d5d7affd5c37af4ef5a294a.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Untitled image</h3>
@@ -155,7 +156,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_40_dd3c4e6c98d7d1cae9e21cececf08a00.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_40_dd3c4e6c98d7d1cae9e21cececf08a00.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Luxury Campaign Post</h3>
@@ -165,7 +167,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_46_2f7818b49107b10f8f44900446c4927a.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_46_2f7818b49107b10f8f44900446c4927a.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Retro Camera Collage I...</h3>
@@ -175,7 +178,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_49_6cc1c4b153db1a9e3d0f6bdc9a2a069d.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_49_6cc1c4b153db1a9e3d0f6bdc9a2a069d.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>BURGER</h3>
@@ -185,7 +189,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_63_f26578fc503c646043b03d2518874c5c.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_63_f26578fc503c646043b03d2518874c5c.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Untitled image</h3>
@@ -195,7 +200,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_61_39406516453dc61fc04aaac5d7a37537.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_61_39406516453dc61fc04aaac5d7a37537.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Abstract Art Design</h3>
@@ -205,7 +211,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_34_a75e35edd49a680597665da6bf14488a.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_34_a75e35edd49a680597665da6bf14488a.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Neon Portrait</h3>
@@ -215,7 +222,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_36_2ad10df92d38f0171ba87ca0d17af081.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_36_2ad10df92d38f0171ba87ca0d17af081.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Red Sneakers</h3>
@@ -225,7 +233,8 @@
 
                 <div class="project-card">
                     <div class="project-thumb">
-                        <img src="assets/images/Inspiration/imgi_43_9559ad4db30640f60aba3f3e2e51ff6c.jpg" alt="">
+                        <img src="assets/images/Inspiration/imgi_43_9559ad4db30640f60aba3f3e2e51ff6c.jpg" alt=""
+                            loading="lazy" decoding="async">
                     </div>
                     <div class="project-info">
                         <h3>Luxury Watch</h3>
@@ -254,6 +263,21 @@
     </section>
 
     <script src="script.js"></script>
+    <script>
+        // Check if Service Worker is supported
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                // Register the service worker from the root
+                navigator.serviceWorker.register('sw.js')
+                    .then(registration => {
+                        console.log('Service Worker registered with scope:', registration.scope);
+                    })
+                    .catch(error => {
+                        console.error('Service Worker registration failed:', error);
+                    });
+            });
+        }
+    </script>
 </body>
 
 </html>

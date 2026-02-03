@@ -629,7 +629,7 @@ function renderInspirationGrid() {
     inspirationData.forEach(item => {
         const itemDiv = document.createElement('div');
         itemDiv.className = 'inspiration-item';
-        itemDiv.innerHTML = `<img src="${item.src}" alt="${item.title}" loading="lazy">`;
+        itemDiv.innerHTML = `<img src="${item.src}" alt="${item.title}" loading="lazy" decoding="async">`;
         grid.appendChild(itemDiv);
     });
 }
