@@ -86,6 +86,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateSendButtonState();
     updateLanguageButton();
     applyTranslations();
+    initializeProjectCards();
 });
 
 // ==================== Event Listeners ====================
@@ -135,6 +136,10 @@ function initializeEventListeners() {
             btn.classList.add('active');
         });
     });
+
+    // Recents Section - New Project
+    // Converted to <a> tag in HTML for better reliability
+
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
@@ -616,8 +621,22 @@ function handleGenerate() {
         return;
     }
 
-    showNotification('Generating your design...');
+    // Open canvas in new tab
+    window.open('canvas.html', '_blank');
 }
+
+// ==================== Project Cards ====================
+function initializeProjectCards() {
+    // Add click handlers to all project cards in recents section
+    const projectCards = document.querySelectorAll('.recents-grid .project-card');
+    projectCards.forEach(card => {
+        card.style.cursor = 'pointer';
+        card.addEventListener('click', () => {
+            window.open('canvas.html', '_blank');
+        });
+    });
+}
+
 
 // ==================== Inspiration Gallery ====================
 function renderInspirationGrid() {
