@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="AI Design - Infinite Canvas">
+    <title>Untitled Project - AI Design</title>
+    <link rel="icon" href="assets/images/logo.png" type="image/png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="canvas.css?v=9">
+</head>
+
+<body class="canvas-mode">
+    <!-- Main Canvas Area (Full Viewport) -->
+    <main class="canvas-area" id="main-canvas">
+        <canvas id="infinite-canvas"></canvas>
+    </main>
+
+    <!-- Top Bar with Project Menu (Embedded in Canvas) -->
+    <header class="top-bar">
+        <!-- Logo and Project Menu -->
+        <div class="left-section">
+            <button class="logo-menu-btn" id="logo-btn">
+                <img src="assets/images/logo.png" alt="AI Design" class="logo">
+                <svg class="dropdown-arrow" width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                        stroke-linejoin="round" />
+                </svg>
+            </button>
+            <input type="text" class="project-name" value="Untitled Project" id="project-name"
+                aria-label="Project Name">
+        </div>
+    </header>
+
+    <!-- Project Menu Dropdown -->
+    <div class="dropdown-menu" id="project-menu" style="display: none;">
+        <button class="menu-item" data-action="new-project">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            <span>New Project</span>
+            <span class="shortcut">Cmd+N</span>
+        </button>
+        <button class="menu-item" data-action="recent-projects">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            <span>Recent Projects</span>
+        </button>
+        <div class="menu-separator"></div>
+        <button class="menu-item" data-action="undo">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 7v6h6"></path>
+                <path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3L3 13"></path>
+            </svg>
+            <span>Undo</span>
+            <span class="shortcut">Cmd+Z</span>
+        </button>
+        <button class="menu-item" data-action="redo">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 7v6h-6"></path>
+                <path d="M3 17a9 9 0 019-9 9 9 0 016 2.3l3 2.7"></path>
+            </svg>
+            <span>Redo</span>
+            <span class="shortcut">Cmd+Shift+Z</span>
+        </button>
+        <div class="menu-separator"></div>
+        <label class="menu-item checkbox-item">
+            <input type="checkbox" id="toggle-pixel-grid">
+            <span>Pixel Grid</span>
+        </label>
+        <label class="menu-item checkbox-item">
+            <input type="checkbox" id="toggle-rulers">
+            <span>Rulers</span>
+        </label>
+        <label class="menu-item checkbox-item">
+            <input type="checkbox" id="toggle-auto-snap" checked>
+            <span>Auto Snap</span>
+        </label>
+        <div class="menu-separator"></div>
+        <button class="menu-item danger" data-action="move-to-trash">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            <span>Move to Trash</span>
+        </button>
+    </div>
+
+    <!-- Top Right Controls (Embedded in Canvas) -->
+    <div class="header-right">
+        <button class="language-text-btn" id="language-btn" aria-label="Language">
+            <span id="language-display">English</span>
+        </button>
+        <button class="icon-btn" aria-label="Notifications">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+        </button>
+        <button class="user-avatar" aria-label="User menu">
+            <img src="assets/images/avatar.png" alt="User">
+        </button>
+    </div>
+
+    <!-- Left Sidebar (Continuous Container) -->
+    <aside class="left-sidebar">
+        <!-- Primary Actions -->
+        <button class="sidebar-btn" data-action="inspiration" title="Inspiration">
+            <img src="assets/images/inspiration.svg" alt="">
+        </button>
+        <button class="sidebar-btn" data-action="elements" title="Elements">
+            <img src="assets/images/Elements.svg" alt="">
+        </button>
+        <button class="sidebar-btn" data-action="brand" title="Brand Kit">
+            <img src="assets/images/Brand kit.svg" alt="">
+        </button>
+        <button class="sidebar-btn" data-action="cloud" title="Cloud">
+            <img src="assets/images/space.svg" alt="">
+        </button>
+        <div class="sidebar-separator"></div>
+        <button class="sidebar-btn" data-action="layers" title="Layers">
+            <img src="assets/images/Layers.svg" alt="">
+        </button>
+    </aside>
+
+    <!-- Bottom Left - Zoom Controls -->
+    <div class="zoom-controls">
+        <button class="zoom-dropdown-btn" id="zoom-dropdown-btn" aria-label="Zoom level">
+            <span id="zoom-display">20%</span>
+            <svg class="dropdown-arrow-small" width="10" height="10" viewBox="0 0 10 10" fill="none">
+                <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" />
+            </svg>
+        </button>
+        <button class="help-btn" title="Help" aria-label="Help">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.5" />
+                <path
+                    d="M7.5 7.5C7.5 6.11929 8.61929 5 10 5C11.3807 5 12.5 6.11929 12.5 7.5C12.5 8.5 11.5 9 10.5 9.5C10.2239 9.64 10 9.86 10 10.2V11"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                <circle cx="10" cy="13.5" r="0.75" fill="currentColor" />
+            </svg>
+        </button>
+    </div>
+
+    <!-- Zoom Dropdown Menu -->
+    <div class="zoom-menu hidden" id="zoom-menu">
+        <button class="menu-item" data-zoom-action="in">
+            <span>Zoom In</span>
+            <span class="shortcut">Cmd +</span>
+        </button>
+        <button class="menu-item" data-zoom-action="out">
+            <span>Zoom Out</span>
+            <span class="shortcut">Cmd -</span>
+        </button>
+        <div class="menu-separator"></div>
+        <button class="menu-item" data-zoom-action="fit">Zoom to Fit</button>
+        <div class="menu-separator"></div>
+        <button class="menu-item" data-zoom="0.5">50%</button>
+        <button class="menu-item" data-zoom="1.0">100%</button>
+        <button class="menu-item" data-zoom="2.0">200%</button>
+    </div>
+
+    <!-- Bottom Toolbar (Continuous Container) -->
+    <div class="bottom-toolbar">
+        <!-- Move Tool (with dropdown indicator for future Hand tool toggle) -->
+        <div class="tool-group">
+            <button class="tool-btn active" data-tool="move" data-tooltip="Select" data-shortcut="V">
+                <img src="assets/images/Cursor.svg" alt="">
+            </button>
+            <button class="tool-btn" data-tool="hand" data-tooltip="Move" data-shortcut="M">
+                <img src="assets/images/Hand.svg" alt="">
+            </button>
+        </div>
+
+        <div class="tool-separator"></div>
+
+        <!-- Frame (formerly Page) -->
+        <button class="tool-btn" data-tool="frame" data-tooltip="Frame" data-shortcut="F">
+            <img src="assets/images/Frame.svg" alt="">
+        </button>
+
+        <!-- Image -->
+        <button class="tool-btn" data-tool="image" data-tooltip="Image" data-shortcut="I">
+            <img src="assets/images/Add Image.svg" alt="">
+        </button>
+
+        <!-- Text -->
+        <button class="tool-btn" data-tool="text" data-tooltip="Text" data-shortcut="T">
+            <img src="assets/images/Text.svg" alt="">
+        </button>
+
+        <!-- Pencil -->
+        <button class="tool-btn" data-tool="pencil" data-tooltip="Pencil" data-shortcut="P">
+            <img src="assets/images/Pencil.svg" alt="">
+        </button>
+
+        <!-- Shape (Rectangle) -->
+        <div class="tool-group">
+            <button class="tool-btn" data-tool="rectangle" data-tooltip="Shape" data-shortcut="R">
+                <img src="assets/images/Rectangle.svg" alt="">
+            </button>
+        </div>
+    </div>
+
+    <!-- Shape Selector Menu -->
+    <div class="shape-menu hidden" id="shape-menu">
+        <button class="menu-item" data-shape="rectangle">
+            <span>Rectangle</span>
+        </button>
+        <button class="menu-item" data-shape="ellipse">
+            <span>Circle</span>
+        </button>
+        <button class="menu-item" data-shape="triangle">
+            <span>Triangle</span>
+        </button>
+        <button class="menu-item" data-shape="star">
+            <span>Star</span>
+        </button>
+        <button class="menu-item" data-shape="line">
+            <span>Line</span>
+        </button>
+    </div>
+
+    </div>
+
+    <!-- Frame Floating Action Bar -->
+    <div id="frame-action-bar" class="floating-toolbar hidden">
+        <div class="toolbar-group">
+            <select id="frame-ratio" class="toolbar-select">
+                <option value="1:1">1:1</option>
+                <option value="4:3">4:3</option>
+                <option value="3:4">3:4</option>
+                <option value="16:9">16:9</option>
+                <option value="9:16">9:16</option>
+            </select>
+        </div>
+        <div class="toolbar-separator"></div>
+        <div class="toolbar-group">
+            <button class="toolbar-btn" style="position:relative; padding:4px 8px; gap:6px">
+                <div id="frame-bg-preview"
+                    style="width:16px; height:16px; border-radius:50%; border:1px solid #ddd; background:#fff"></div>
+                <span style="font-size:12px; font-weight:500">Background</span>
+                <input type="color" id="frame-bg-color" value="#ffffff"
+                    style="position:absolute; top:0; left:0; width:100%; height:100%; opacity:0; cursor:pointer;">
+            </button>
+        </div>
+        <div class="toolbar-separator"></div>
+        <button id="frame-download-btn" class="toolbar-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                style="margin-right:4px">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Download
+        </button>
+    </div>
+
+    <!-- Right Sidebar (Agent, Floating) -->
+    <aside class="right-sidebar">
+        <div class="agent-panel" id="agent-panel">
+            <div class="agent-header">
+                <div class="agent-title">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a10 10 0 1 0 10 10H12V2z" />
+                        <path d="M12 12 2.1 11.9" />
+                        <path d="M12 12V2.1" />
+                    </svg>
+                    AI Assistant
+                </div>
+                <button class="icon-btn" id="close-agent-btn">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="agent-content">
+                <div style="color: var(--text-tertiary); text-align: center; margin-top: 40px;">
+                    <p>How can I help you design today?</p>
+                </div>
+            </div>
+            <div class="agent-input-area">
+                <input type="text" placeholder="Ask AI..."
+                    style="width: 100%; border: 1px solid var(--border-color); padding: 8px 12px; border-radius: var(--radius-md); outline: none;">
+            </div>
+        </div>
+
+        <button class="agent-trigger-btn" id="agent-trigger-btn">
+            <span style="color: #4285F4; font-weight: bold; font-size: 16px;">✦</span>
+            Chat with Agent
+        </button>
+    </aside>
+
+    <script src="canvas-engine.js"></script>
+    <script src="canvas.js"></script>
+</body>
+
+</html>

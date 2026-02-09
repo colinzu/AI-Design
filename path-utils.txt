@@ -1,0 +1,26 @@
+
+    // Calculate bounding box for path
+    getPathBounds(path) {
+        if (!path.points || path.points.length === 0) {
+            return { x: 0, y: 0, width: 0, height: 0 };
+        }
+        
+        let minX = path.points[0].x;
+        let minY = path.points[0].y;
+        let maxX = path.points[0].x;
+        let maxY = path.points[0].y;
+        
+        path.points.forEach(p => {
+            minX = Math.min(minX, p.x);
+            minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x);
+            maxY = Math.max(maxY, p.y);
+        });
+        
+        return {
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        };
+    }
