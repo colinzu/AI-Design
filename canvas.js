@@ -223,8 +223,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (e.defaultPrevented) return;
 
-        // Tool shortcuts
-        if (!engine.editingText) {
+        // Tool shortcuts (skip if editing text or gen-panel input is focused)
+        if (!engine.editingText && !engine.isInputActive()) {
             const toolMap = {
                 'v': 'move',
                 'h': 'hand',

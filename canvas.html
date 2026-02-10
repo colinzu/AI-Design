@@ -15,6 +15,14 @@
 </head>
 
 <body class="canvas-mode">
+    <!-- Unregister Service Worker on canvas page to prevent data URL interception crashes -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                registrations.forEach(function(r) { r.unregister(); });
+            });
+        }
+    </script>
     <!-- Main Canvas Area (Full Viewport) -->
     <main class="canvas-area" id="main-canvas">
         <canvas id="infinite-canvas"></canvas>
@@ -264,6 +272,73 @@
         </button>
     </div>
 
+    <!-- Frame Generation Input Panel (Below Selected Frame) -->
+    <div id="gen-panel" class="gen-panel hidden">
+        <!-- Uploaded Reference Images -->
+        <div class="gen-uploaded-images" id="gen-uploaded-images"></div>
+
+        <!-- Prompt Input -->
+        <div class="gen-input-area">
+            <div class="gen-input-editor" id="gen-input-editor" contenteditable="true"
+                data-placeholder="Enter ideas or upload images..."></div>
+        </div>
+
+        <!-- Footer: add-btn, model selector, image count, send -->
+        <div class="gen-footer">
+            <div class="gen-footer-left">
+                <!-- Image Upload Button -->
+                <button class="gen-add-btn" id="gen-add-btn" title="Upload reference image">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19" />
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                </button>
+
+                <!-- Model Selector -->
+                <div class="gen-model-selector" id="gen-model-selector">
+                    <img src="assets/images/Model.svg" alt="Model" class="model-icon-img">
+                    <span class="gen-model-label">Nano Banana Pro</span>
+                </div>
+
+                <!-- Image Count Selector -->
+                <div class="gen-count-selector" id="gen-count-selector">
+                    <span class="gen-count-label">1 Image</span>
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                        <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" stroke-width="1.5"
+                            stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                </div>
+            </div>
+            <div class="gen-footer-right">
+                <!-- Send Button -->
+                <button class="gen-send-btn" id="gen-send-btn" disabled>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2.5">
+                        <line x1="12" y1="19" x2="12" y2="5" />
+                        <polyline points="5 12 12 5 19 12" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- Loading Overlay (shown during generation) -->
+        <div class="gen-loading hidden" id="gen-loading">
+            <div class="gen-loading-content">
+                <div class="gen-loading-spinner"></div>
+                <span>Thinking...</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image Count Dropdown -->
+    <div class="gen-count-menu hidden" id="gen-count-menu">
+        <button class="menu-item" data-count="1">1 Image</button>
+        <button class="menu-item" data-count="2">2 Images</button>
+        <button class="menu-item" data-count="3">3 Images</button>
+        <button class="menu-item" data-count="4">4 Images</button>
+    </div>
+
     <!-- Right Sidebar (Agent, Floating) -->
     <aside class="right-sidebar">
         <div class="agent-panel" id="agent-panel">
@@ -300,8 +375,10 @@
         </button>
     </aside>
 
+    <script src="models.js"></script>
     <script src="canvas-engine.js"></script>
     <script src="canvas.js"></script>
+    <script src="canvas-gen.js"></script>
 </body>
 
 </html>
