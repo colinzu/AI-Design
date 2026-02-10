@@ -480,11 +480,7 @@
             }
 
             if (successfulImages.length === 0) {
-                // Collect error messages
-                const errors = results
-                    .filter(r => r.status === 'rejected')
-                    .map(r => r.reason?.message || 'Unknown error');
-                throw new Error(errors[0] || 'No images were generated. Please try again.');
+                throw new Error('No images were generated. Please try again.');
             }
 
             // Place images into frames
