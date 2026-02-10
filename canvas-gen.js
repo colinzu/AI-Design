@@ -1,6 +1,7 @@
 /**
  * Canvas Generation Panel — AI Image Generation Input
- * Manages the generation input panel that appears below selected frames.
+ * Manages the generation input panel that appears below selected elements.
+ * Three states: collapsed (capsule), expanded (full input), thinking (loading).
  * Calls Nano Banana Pro via Google Gemini generateContent API.
  */
 
@@ -10,9 +11,13 @@
         selectedModel: 'nano-banana',
         selectedModelName: 'Nano Banana Pro',
         imageCount: 1,
-        uploadedImages: [],     // { index, src, name }
+        uploadedImages: [],     // { index, src, name, fromSelection? }
         isGenerating: false,
-        currentFrame: null      // Reference to selected frame element
+        abortController: null,  // AbortController for cancelling generation
+        currentFrame: null,     // Reference to target frame for placing generated images
+        currentAnchor: null,    // { x, y, width, height } bounding box for positioning
+        panelMode: 'hidden',    // 'hidden' | 'collapsed' | 'expanded' | 'thinking'
+        selectedElements: [],   // Copy of selected elements for replacement logic
     };
 
     // Supported aspect ratios by Gemini API
@@ -73,13 +78,43 @@
             // Call existing handler first (frame-action-bar logic)
             if (existingSelectionHandler) existingSelectionHandler(selectedElements);
 
-            const frame = selectedElements.find(el => el.type === 'frame');
-            if (selectedElements.length === 1 && frame) {
-                genState.currentFrame = frame;
-                showGenPanel(frame);
-            } else {
-                genState.currentFrame = null;
+            // Don't change panel if currently generating
+            if (genState.isGenerating) return;
+
+            if (selectedElements.length === 0) {
                 hideGenPanel();
+                return;
+            }
+
+            genState.selectedElements = [...selectedElements];
+            const frame = selectedElements.find(el => el.type === 'frame');
+
+            if (selectedElements.length === 1 && frame) {
+                // Selected a Frame
+                genState.currentFrame = frame;
+                genState.currentAnchor = frame;
+
+                // Check if frame is empty (no elements inside it)
+                const hasContent = engine.elements.some(el =>
+                    el !== frame && el.type !== 'frame' &&
+                    el.x >= frame.x && el.x + (el.width || 0) <= frame.x + frame.width &&
+                    el.y >= frame.y && el.y + (el.height || 0) <= frame.y + frame.height
+                );
+
+                if (!hasContent) {
+                    // Empty frame → expanded (active input, ready to type)
+                    showGenPanel('expanded');
+                    autoFocusEditor();
+                } else {
+                    // Frame has content → collapsed
+                    showGenPanel('collapsed');
+                }
+            } else {
+                // Selected non-frame content (images, shapes, etc.) → collapsed state
+                genState.currentFrame = findParentFrame(selectedElements);
+                genState.currentAnchor = getSelectionBounds(selectedElements);
+                collectSelectedAsReference(selectedElements);
+                showGenPanel('collapsed');
             }
         };
 
@@ -87,8 +122,8 @@
         const existingRender = engine.render.bind(engine);
         engine.render = () => {
             existingRender();
-            if (genState.currentFrame && !genPanel.classList.contains('hidden')) {
-                updateGenPanelPosition(genState.currentFrame);
+            if (genState.panelMode !== 'hidden' && genState.currentAnchor) {
+                updateGenPanelPosition(genState.currentAnchor);
             }
         };
 
@@ -98,45 +133,154 @@
         console.log('[canvas-gen] Generation panel initialized');
     }
 
-    // ==================== Panel Show / Hide / Position ====================
-    function showGenPanel(frame) {
+    // ==================== Panel Show / Hide / State ====================
+
+    /**
+     * Show the gen panel in a specific mode: 'collapsed', 'expanded', or 'thinking'
+     */
+    function showGenPanel(mode) {
         const genPanel = document.getElementById('gen-panel');
-        genPanel.classList.remove('hidden');
-        updateGenPanelPosition(frame);
+        genPanel.classList.remove('hidden', 'collapsed', 'expanded', 'thinking');
+        genPanel.classList.add(mode);
+        genState.panelMode = mode;
+        if (genState.currentAnchor) {
+            updateGenPanelPosition(genState.currentAnchor);
+        }
     }
 
     function hideGenPanel() {
         const genPanel = document.getElementById('gen-panel');
+        genPanel.classList.remove('collapsed', 'expanded', 'thinking');
         genPanel.classList.add('hidden');
+        genState.panelMode = 'hidden';
+        genState.currentFrame = null;
+        genState.currentAnchor = null;
         hideGenModelPicker();
         hideGenCountMenu();
     }
 
-    function updateGenPanelPosition(frame) {
+    function updateGenPanelPosition(anchor) {
         const engine = window.canvasEngine;
         const genPanel = document.getElementById('gen-panel');
         if (!engine || !genPanel) return;
 
-        // Position below frame center
-        const worldCenterX = frame.x + frame.width / 2;
-        const worldBottomY = frame.y + frame.height;
+        // Position below anchor center
+        const worldCenterX = anchor.x + anchor.width / 2;
+        const worldBottomY = anchor.y + anchor.height;
         const screenPos = engine.worldToScreen(worldCenterX, worldBottomY);
 
         if (!screenPos || typeof screenPos.x !== 'number') return;
 
         genPanel.style.left = screenPos.x + 'px';
-        genPanel.style.top = (screenPos.y + 16) + 'px'; // 16px gap below frame
+        genPanel.style.top = (screenPos.y + 16) + 'px'; // 16px gap below element
+    }
+
+    function autoFocusEditor() {
+        const editor = document.getElementById('gen-input-editor');
+        if (editor) {
+            requestAnimationFrame(() => editor.focus());
+        }
+    }
+
+    // ==================== Selection Helpers ====================
+
+    /**
+     * Find the parent frame that contains the selected elements (by coordinate overlap).
+     */
+    function findParentFrame(elements) {
+        const engine = window.canvasEngine;
+        if (!engine) return null;
+
+        const bounds = getSelectionBounds(elements);
+        const frames = engine.elements.filter(el => el.type === 'frame');
+
+        // Find frame whose bounds contain the selection center
+        const cx = bounds.x + bounds.width / 2;
+        const cy = bounds.y + bounds.height / 2;
+
+        for (let i = frames.length - 1; i >= 0; i--) {
+            const f = frames[i];
+            if (cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height) {
+                return f;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get the bounding box of selected elements.
+     */
+    function getSelectionBounds(elements) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const el of elements) {
+            minX = Math.min(minX, el.x);
+            minY = Math.min(minY, el.y);
+            maxX = Math.max(maxX, el.x + (el.width || 0));
+            maxY = Math.max(maxY, el.y + (el.height || 0));
+        }
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }
+
+    /**
+     * Collect selected image elements as reference images for the gen panel.
+     */
+    function collectSelectedAsReference(elements) {
+        // Remove previous auto-collected images, keep user-uploaded ones
+        genState.uploadedImages = genState.uploadedImages.filter(img => !img.fromSelection);
+
+        for (const el of elements) {
+            if (el.type === 'image' && el.image) {
+                try {
+                    const tempCanvas = document.createElement('canvas');
+                    // Cap resolution for performance
+                    const scale = Math.min(1, 1024 / Math.max(el.width, el.height));
+                    tempCanvas.width = Math.round(el.width * scale);
+                    tempCanvas.height = Math.round(el.height * scale);
+                    const ctx = tempCanvas.getContext('2d');
+                    ctx.drawImage(el.image, 0, 0, tempCanvas.width, tempCanvas.height);
+                    const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.85);
+
+                    genState.uploadedImages.push({
+                        index: genState.uploadedImages.length + 1,
+                        src: dataUrl,
+                        name: 'Selected image',
+                        fromSelection: true
+                    });
+                } catch (err) {
+                    console.warn('[canvas-gen] Failed to export selected image:', err);
+                }
+            }
+        }
+        renderGenUploadedImages();
+        updateGenSendState();
     }
 
     // ==================== Event Listeners ====================
     function setupGenPanelEvents() {
         const genPanel = document.getElementById('gen-panel');
+        const collapsed = document.getElementById('gen-collapsed');
         const editor = document.getElementById('gen-input-editor');
         const addBtn = document.getElementById('gen-add-btn');
         const modelSelector = document.getElementById('gen-model-selector');
         const countSelector = document.getElementById('gen-count-selector');
         const countMenu = document.getElementById('gen-count-menu');
         const sendBtn = document.getElementById('gen-send-btn');
+        const stopBtn = document.getElementById('gen-stop-btn');
+
+        // Collapsed capsule click → expand
+        collapsed.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showGenPanel('expanded');
+            autoFocusEditor();
+        });
+
+        // Stop button → abort generation
+        stopBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (genState.abortController) {
+                genState.abortController.abort();
+            }
+        });
 
         // 1. Prompt input → update send button state
         editor.addEventListener('input', updateGenSendState);
@@ -246,7 +390,7 @@
         genState.uploadedImages.forEach((img, idx) => {
             img.index = idx + 1;
             const div = document.createElement('div');
-            div.className = 'gen-uploaded-image';
+            div.className = 'gen-uploaded-image' + (img.fromSelection ? ' from-selection' : '');
             div.innerHTML = `
                 <img src="${img.src}" alt="Ref ${img.index}">
                 <button class="gen-remove-btn" data-idx="${idx}">
@@ -283,7 +427,7 @@
             picker = document.createElement('div');
             picker.id = 'gen-model-picker';
             picker.className = 'floating-picker model-picker-panel';
-            document.getElementById('gen-panel').appendChild(picker);
+            document.getElementById('gen-expanded').appendChild(picker);
 
             // Prevent events from bubbling to canvas
             picker.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -393,28 +537,38 @@
 
     // ==================== API Call & Generation ====================
     async function handleGenerate() {
-        if (genState.isGenerating) return;
-        // Set flag IMMEDIATELY to prevent any duplicate calls
-        genState.isGenerating = true;
-
         const editor = document.getElementById('gen-input-editor');
         const prompt = editor ? editor.textContent.trim() : '';
-        const frame = genState.currentFrame;
+        const anchor = genState.currentAnchor;
 
-        if (!frame) { genState.isGenerating = false; return; }
-        if (!prompt && genState.uploadedImages.length === 0) { genState.isGenerating = false; return; }
+        if (!anchor) return;
+        if (!prompt && genState.uploadedImages.length === 0) return;
 
         // Get model config
         const modelConfig = MODEL_CONFIGS[genState.selectedModel];
         if (!modelConfig) {
-            genState.isGenerating = false;
             showGenNotification('Selected model is not yet available.');
             return;
         }
 
-        showGenLoading(true);
+        // Snapshot all context at generation start so each call is independent
+        const genContext = {
+            frame: genState.currentFrame,
+            anchor: { ...anchor },
+            images: [...genState.uploadedImages],
+            imageCount: genState.imageCount,
+            selectedElements: [...genState.selectedElements],
+        };
 
-        // Disable send button immediately to prevent double-click
+        // Switch this panel to thinking state
+        genState.isGenerating = true;
+        showGenPanel('thinking');
+
+        // Create abort controller for this generation
+        const abortController = new AbortController();
+        genState.abortController = abortController;
+
+        // Disable send button
         const sendBtn = document.getElementById('gen-send-btn');
         if (sendBtn) sendBtn.disabled = true;
 
@@ -422,13 +576,11 @@
             // Build Gemini generateContent request body
             const parts = [];
 
-            // Add text prompt
             const textPrompt = prompt || 'Generate a high-quality image based on the reference image(s) provided.';
             parts.push({ text: textPrompt });
 
             // Add reference images as inlineData
-            for (const img of genState.uploadedImages) {
-                // img.src is a data URL: "data:image/png;base64,..."
+            for (const img of genContext.images) {
                 const match = img.src.match(/^data:([^;]+);base64,(.+)$/);
                 if (match) {
                     parts.push({
@@ -440,8 +592,9 @@
                 }
             }
 
-            // Match frame aspect ratio to closest Gemini-supported ratio
-            const aspectRatio = getClosestAspectRatio(frame.width, frame.height);
+            // Use frame or anchor dimensions for aspect ratio
+            const refRect = genContext.frame || genContext.anchor;
+            const aspectRatio = getClosestAspectRatio(refRect.width, refRect.height);
 
             // Detect image size from prompt (default 1K, user can say "2k" or "4k")
             let imageSize = '1K';
@@ -459,18 +612,21 @@
                 }
             };
 
-            // Send requests sequentially (avoids SSL EOF errors from concurrent connections)
-            // Each request retries up to 2 times on transient failures
+            // Generate images sequentially
             const successfulImages = [];
-            for (let i = 0; i < genState.imageCount; i++) {
+            for (let i = 0; i < genContext.imageCount; i++) {
+                if (abortController.signal.aborted) break;
+
                 let lastError = null;
                 for (let attempt = 0; attempt < 3; attempt++) {
+                    if (abortController.signal.aborted) break;
                     try {
-                        const result = await callGenerateApi(modelConfig, requestBody);
+                        const result = await callGenerateApi(modelConfig, requestBody, abortController);
                         if (result) successfulImages.push(result);
                         lastError = null;
                         break;
                     } catch (e) {
+                        if (e.name === 'AbortError') throw e;
                         lastError = e;
                         console.warn('Image ' + (i + 1) + ' attempt ' + (attempt + 1) + ' failed:', e.message);
                         if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
@@ -479,12 +635,16 @@
                 if (lastError) console.error('Image ' + (i + 1) + ' failed after 3 attempts:', lastError.message);
             }
 
+            if (abortController.signal.aborted) {
+                throw new DOMException('Generation stopped by user', 'AbortError');
+            }
+
             if (successfulImages.length === 0) {
                 throw new Error('No images were generated. Please try again.');
             }
 
-            // Place images into frames
-            await placeGeneratedImages(successfulImages, frame);
+            // Place images
+            await placeGeneratedImages(successfulImages, genContext);
 
             // Clear input after success
             editor.textContent = '';
@@ -493,24 +653,37 @@
             updateGenSendState();
 
         } catch (error) {
-            console.error('[canvas-gen] Generation failed:', error);
-            showGenNotification('Generation failed: ' + error.message);
+            if (error.name === 'AbortError') {
+                console.log('[canvas-gen] Generation stopped by user');
+                showGenNotification('Generation stopped.');
+            } else {
+                console.error('[canvas-gen] Generation failed:', error);
+                showGenNotification('Generation failed: ' + error.message);
+            }
         } finally {
             genState.isGenerating = false;
-            showGenLoading(false);
-            updateGenSendState(); // Re-enable send button if there's still content
+            genState.abortController = null;
+            // Return to collapsed state after generation
+            showGenPanel('collapsed');
+            updateGenSendState();
         }
     }
 
-    async function callGenerateApi(modelConfig, requestBody) {
+    async function callGenerateApi(modelConfig, requestBody, abortController) {
         // Send model in body — the server/Worker uses it to build the Gemini URL
         const payload = { ...requestBody, model: modelConfig.model };
 
-        const response = await fetch(modelConfig.endpoint, {
+        const fetchOptions = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
-        });
+        };
+
+        if (abortController) {
+            fetchOptions.signal = abortController.signal;
+        }
+
+        const response = await fetch(modelConfig.endpoint, fetchOptions);
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -538,7 +711,7 @@
     }
 
     // ==================== Place Images into Frames ====================
-    async function placeGeneratedImages(imageDataArray, sourceFrame) {
+    async function placeGeneratedImages(imageDataArray, genContext) {
         const engine = window.canvasEngine;
         if (!engine) return;
 
@@ -564,68 +737,108 @@
 
         if (loadedImages.length === 0) return;
 
+        const { frame: sourceFrame, anchor, selectedElements } = genContext;
+
         // Save state before modifications (for undo support)
         engine.saveState();
 
-        const FRAME_SPACING = 80; // px in world coordinates
+        const refRect = sourceFrame || anchor;
+        const FRAME_SPACING = 80;
 
-        loadedImages.forEach((img, index) => {
-            if (index === 0) {
-                // First image: fill into the current (source) frame
-                const imageElement = {
-                    type: 'image',
-                    x: sourceFrame.x,
-                    y: sourceFrame.y,
-                    width: sourceFrame.width,
-                    height: sourceFrame.height,
-                    image: img,
-                    src: img.src
-                };
-                engine.elements.push(imageElement);
-            } else {
-                // Subsequent images: create new frames to the right
-                const newFrameX = sourceFrame.x + (sourceFrame.width + FRAME_SPACING) * index;
-                const newFrameY = sourceFrame.y;
+        // Determine if selected elements are inside a frame
+        const isInsideFrame = sourceFrame && selectedElements.some(el =>
+            el !== sourceFrame && el.type !== 'frame'
+        );
 
-                // Create new frame
-                const frameCount = engine.elements.filter(el => el.type === 'frame').length + 1;
-                const newFrame = {
-                    type: 'frame',
-                    name: 'Page ' + frameCount,
-                    x: newFrameX,
-                    y: newFrameY,
-                    width: sourceFrame.width,
-                    height: sourceFrame.height,
-                    fill: sourceFrame.fill,
-                    stroke: '#E0E0E0',
-                    strokeWidth: 1
-                };
-                engine.elements.push(newFrame);
-
-                // Place image in the new frame
-                const imageElement = {
-                    type: 'image',
-                    x: newFrameX,
-                    y: newFrameY,
-                    width: sourceFrame.width,
-                    height: sourceFrame.height,
-                    image: img,
-                    src: img.src
-                };
-                engine.elements.push(imageElement);
+        if (isInsideFrame) {
+            // CASE: Selected content inside a frame → replace selected elements
+            for (const sel of selectedElements) {
+                if (sel.type === 'frame') continue;
+                const idx = engine.elements.indexOf(sel);
+                if (idx !== -1) engine.elements.splice(idx, 1);
             }
-        });
+
+            loadedImages.forEach((img, index) => {
+                if (index === 0) {
+                    // First image replaces into the source frame
+                    const imageElement = {
+                        type: 'image',
+                        x: sourceFrame.x,
+                        y: sourceFrame.y,
+                        width: sourceFrame.width,
+                        height: sourceFrame.height,
+                        image: img,
+                        src: img.src,
+                        parentFrame: sourceFrame
+                    };
+                    engine.elements.push(imageElement);
+                } else {
+                    const newFrameX = sourceFrame.x + (sourceFrame.width + FRAME_SPACING) * index;
+                    const newFrameY = sourceFrame.y;
+                    addFrameWithImage(engine, img, newFrameX, newFrameY,
+                        sourceFrame.width, sourceFrame.height, sourceFrame.fill);
+                }
+            });
+        } else if (sourceFrame) {
+            // CASE: Selected empty frame → place into frame
+            loadedImages.forEach((img, index) => {
+                if (index === 0) {
+                    const imageElement = {
+                        type: 'image',
+                        x: sourceFrame.x,
+                        y: sourceFrame.y,
+                        width: sourceFrame.width,
+                        height: sourceFrame.height,
+                        image: img,
+                        src: img.src,
+                        parentFrame: sourceFrame
+                    };
+                    engine.elements.push(imageElement);
+                } else {
+                    const newFrameX = sourceFrame.x + (sourceFrame.width + FRAME_SPACING) * index;
+                    const newFrameY = sourceFrame.y;
+                    addFrameWithImage(engine, img, newFrameX, newFrameY,
+                        sourceFrame.width, sourceFrame.height, sourceFrame.fill);
+                }
+            });
+        } else {
+            // CASE: No frame → create new frames to the right of selection
+            loadedImages.forEach((img, index) => {
+                const newFrameX = refRect.x + (refRect.width + FRAME_SPACING) * (index + 1);
+                const newFrameY = refRect.y;
+                addFrameWithImage(engine, img, newFrameX, newFrameY,
+                    refRect.width, refRect.height, '#FFFFFF');
+            });
+        }
 
         // Re-render canvas
         engine.render();
     }
 
-    // ==================== Loading State ====================
-    function showGenLoading(show) {
-        const loading = document.getElementById('gen-loading');
-        if (loading) {
-            loading.classList.toggle('hidden', !show);
-        }
+    /**
+     * Helper: add a frame + image at a position.
+     * Frame is inserted BEFORE the image so the image renders on top.
+     */
+    function addFrameWithImage(engine, img, x, y, width, height, fill) {
+        const frameCount = engine.elements.filter(el => el.type === 'frame').length + 1;
+        const newFrame = {
+            type: 'frame',
+            name: 'Page ' + frameCount,
+            x, y, width, height,
+            fill: fill,
+            stroke: '#E0E0E0',
+            strokeWidth: 1
+        };
+        engine.elements.push(newFrame);
+
+        const imageElement = {
+            type: 'image',
+            x, y, width, height,
+            image: img,
+            src: img.src,
+            parentFrame: newFrame
+        };
+        engine.elements.push(imageElement);
     }
 
     // ==================== Notifications ====================

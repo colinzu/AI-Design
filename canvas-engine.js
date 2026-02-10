@@ -46,6 +46,9 @@ class CanvasEngine {
         this.editingText = null;
         this.textInput = null;
 
+        // Frame container state
+        this.highlightedFrame = null; // Frame being hovered during drag
+
         // Performance optimization
         this.renderScheduled = false;
 
@@ -173,27 +176,43 @@ class CanvasEngine {
 
     // ==================== History ====================
 
-    // Save current state BEFORE making changes
-    // This allows undo to restore to the state before the operation
-    saveState() {
-        // Deep clone elements array, preserving Image objects
-        const clonedElements = this.elements.map(el => {
+    // Clone elements array, converting parentFrame references to indices
+    cloneElements(elements) {
+        const cloned = elements.map(el => {
             const clone = { ...el };
-            // Image objects are preserved by reference (they're immutable)
             if (el.type === 'image' && el.image) {
-                clone.image = el.image; // Keep reference to Image object
+                clone.image = el.image;
             }
-            // Deep clone points array for paths
             if (el.type === 'path' && el.points) {
                 clone.points = el.points.map(p => ({ ...p }));
             }
+            // Convert parentFrame reference to index for serialization
+            if (el.parentFrame) {
+                clone.parentFrameIndex = elements.indexOf(el.parentFrame);
+                delete clone.parentFrame;
+            }
             return clone;
         });
+        return cloned;
+    }
 
+    // Restore parentFrame references from indices
+    restoreParentRefs(elements) {
+        elements.forEach(el => {
+            if (el.parentFrameIndex !== undefined && el.parentFrameIndex >= 0) {
+                el.parentFrame = elements[el.parentFrameIndex];
+            }
+            delete el.parentFrameIndex;
+        });
+        return elements;
+    }
+
+    // Save current state BEFORE making changes
+    saveState() {
+        const clonedElements = this.cloneElements(this.elements);
         const state = { elements: clonedElements };
 
         // Only save if state is different from last saved state
-        // Compare by stringifying without image objects
         const stateStr = JSON.stringify({
             elements: clonedElements.map(el => {
                 const { image, ...rest } = el;
@@ -222,31 +241,17 @@ class CanvasEngine {
     undo() {
         if (this.history.past.length === 0) return;
 
-        // Deep clone current state to future
-        const currentClone = this.elements.map(el => {
-            const clone = { ...el };
-            if (el.type === 'image' && el.image) {
-                clone.image = el.image;
-            }
-            if (el.type === 'path' && el.points) {
-                clone.points = el.points.map(p => ({ ...p }));
-            }
-            return clone;
-        });
+        const currentClone = this.cloneElements(this.elements);
         this.history.future.push({ elements: currentClone });
 
-        // Restore previous state
         const prevState = this.history.past.pop();
-        this.elements = prevState.elements.map(el => {
+        this.elements = this.restoreParentRefs(prevState.elements.map(el => {
             const clone = { ...el };
-            if (el.type === 'image' && el.image) {
-                clone.image = el.image;
-            }
-            if (el.type === 'path' && el.points) {
-                clone.points = el.points.map(p => ({ ...p }));
-            }
+            if (el.type === 'image' && el.image) clone.image = el.image;
+            if (el.type === 'path' && el.points) clone.points = el.points.map(p => ({ ...p }));
+            if (el.parentFrameIndex !== undefined) clone.parentFrameIndex = el.parentFrameIndex;
             return clone;
-        });
+        }));
         this.selectedElements = [];
 
         this.render();
@@ -255,31 +260,17 @@ class CanvasEngine {
     redo() {
         if (this.history.future.length === 0) return;
 
-        // Deep clone current state to past
-        const currentClone = this.elements.map(el => {
-            const clone = { ...el };
-            if (el.type === 'image' && el.image) {
-                clone.image = el.image;
-            }
-            if (el.type === 'path' && el.points) {
-                clone.points = el.points.map(p => ({ ...p }));
-            }
-            return clone;
-        });
+        const currentClone = this.cloneElements(this.elements);
         this.history.past.push({ elements: currentClone });
 
-        // Restore next state
         const nextState = this.history.future.pop();
-        this.elements = nextState.elements.map(el => {
+        this.elements = this.restoreParentRefs(nextState.elements.map(el => {
             const clone = { ...el };
-            if (el.type === 'image' && el.image) {
-                clone.image = el.image;
-            }
-            if (el.type === 'path' && el.points) {
-                clone.points = el.points.map(p => ({ ...p }));
-            }
+            if (el.type === 'image' && el.image) clone.image = el.image;
+            if (el.type === 'path' && el.points) clone.points = el.points.map(p => ({ ...p }));
+            if (el.parentFrameIndex !== undefined) clone.parentFrameIndex = el.parentFrameIndex;
             return clone;
-        });
+        }));
         this.selectedElements = [];
 
         this.render();
@@ -570,45 +561,90 @@ class CanvasEngine {
             const dx = worldPos.x - this.dragStartWorld.x;
             const dy = worldPos.y - this.dragStartWorld.y;
 
+            // Track frame delta for moving children
+            const frameDx = worldPos.x - (this.lastWorldPos ? this.lastWorldPos.x : this.dragStartWorld.x);
+            const frameDy = worldPos.y - (this.lastWorldPos ? this.lastWorldPos.y : this.dragStartWorld.y);
+
+            // Collect all frame children that should move (for frames being dragged)
+            // Map: frame -> list of children
+            const frameChildrenMap = new Map();
+            this.selectedElements.forEach(el => {
+                if (el.type === 'frame') {
+                    const children = this.getFrameChildren(el).filter(
+                        child => !this.selectedElements.includes(child)
+                    );
+                    if (children.length > 0) {
+                        frameChildrenMap.set(el, children);
+                    }
+                }
+            });
+
             this.selectedElements.forEach(el => {
                 const startPos = this.dragStartPositions.get(el);
                 if (startPos) {
                     const newX = startPos.x + dx;
                     const newY = startPos.y + dy;
+                    const oldX = el.x;
+                    const oldY = el.y;
 
                     if (el.type === 'path') {
-                        // For paths, we need to move all points
-                        // This is tricky if we modify points relative to initial.
-                        // Ideally store initial points.
-                        // Simplified: update x/y offset logic if path uses x/y?
-                        // Path usually has points.
-                        // Current path logic uses absolute points? 
-                        // If path uses relative points to x/y, updating x/y is enough.
-                        // If path uses absolute points, we need to shift points.
-                        // Let's assume updating el.x delta shifts everything if render handles it.
-                        // But renderPath uses points directly.
-                        // So we need to shift points.
-                        // For MVP, handle non-path elements first or shift points by delta from last frame?
-                        // Better: delta from last frame.
-                        const frameDx = worldPos.x - (this.lastWorldPos ? this.lastWorldPos.x : this.dragStartWorld.x);
-                        const frameDy = worldPos.y - (this.lastWorldPos ? this.lastWorldPos.y : this.dragStartWorld.y);
-
                         el.points.forEach(p => {
                             p.x += frameDx;
                             p.y += frameDy;
                         });
-
-                        // Update bounding box
                         el.x += frameDx;
                         el.y += frameDy;
                     } else {
-                        // Apply snap for non-path elements
                         const snapped = this.snapPosition(newX, newY, el.width, el.height, this.selectedElements);
                         el.x = snapped.x;
                         el.y = snapped.y;
                     }
+
+                    // Move frame children by the actual frame delta (after snap)
+                    if (el.type === 'frame' && frameChildrenMap.has(el)) {
+                        const actualDx = el.x - oldX;
+                        const actualDy = el.y - oldY;
+                        frameChildrenMap.get(el).forEach(child => {
+                            if (child.type === 'path') {
+                                child.points.forEach(p => {
+                                    p.x += actualDx;
+                                    p.y += actualDy;
+                                });
+                                child.x += actualDx;
+                                child.y += actualDy;
+                            } else {
+                                child.x += actualDx;
+                                child.y += actualDy;
+                            }
+                        });
+                    }
                 }
             });
+
+            // Detect frame hover for non-frame elements being dragged
+            this.highlightedFrame = null;
+            const isDraggingNonFrame = this.selectedElements.some(el => el.type !== 'frame');
+            if (isDraggingNonFrame) {
+                // Check overlap with frames for the first non-frame selected element
+                const draggedEl = this.selectedElements.find(el => el.type !== 'frame');
+                if (draggedEl) {
+                    let bestFrame = null;
+                    let bestOverlap = 0;
+                    this.elements.forEach(fr => {
+                        if (fr.type !== 'frame') return;
+                        if (this.selectedElements.includes(fr)) return;
+                        const overlap = this.getOverlapPercent(draggedEl, fr);
+                        if (overlap > bestOverlap) {
+                            bestOverlap = overlap;
+                            bestFrame = fr;
+                        }
+                    });
+                    if (bestOverlap > 0.5 && bestFrame) {
+                        this.highlightedFrame = bestFrame;
+                    }
+                }
+            }
+
             this.render();
         } else if (this.isSelecting) {
             this.selectionEnd = { x: worldPos.x, y: worldPos.y };
@@ -641,6 +677,9 @@ class CanvasEngine {
                 this.saveState();
                 this.elements.push(this.tempElement);
 
+                // Auto-attach to frame if created inside one
+                this.updateFrameAttachment(this.tempElement);
+
                 // Auto-switch to Select tool after creating element (except for pencil)
                 if (this.currentTool !== 'pencil' && this.currentTool !== 'move') {
                     this.setTool('move');
@@ -670,6 +709,16 @@ class CanvasEngine {
                 this.selectedElements = [clickedElement];
                 this.render();
             }
+        }
+
+        // Finalize frame attachment after drag
+        if (this.isDragging) {
+            this.selectedElements.forEach(el => {
+                if (el.type !== 'frame') {
+                    this.updateFrameAttachment(el);
+                }
+            });
+            this.highlightedFrame = null;
         }
 
         // Save state only if an operation was completed (drag or resize, NOT selection)
@@ -779,8 +828,20 @@ class CanvasEngine {
             !this.editingText &&
             !this.isInputActive()) {
 
-            // Remove all selected elements
-            this.elements = this.elements.filter(el => !this.selectedElements.includes(el));
+            // Collect all elements to delete (including children of deleted frames)
+            const toDelete = new Set(this.selectedElements);
+            this.selectedElements.forEach(el => {
+                if (el.type === 'frame') {
+                    this.getFrameChildren(el).forEach(child => toDelete.add(child));
+                }
+            });
+            // Also detach any elements whose parent is being deleted
+            this.elements.forEach(el => {
+                if (el.parentFrame && toDelete.has(el.parentFrame)) {
+                    toDelete.add(el);
+                }
+            });
+            this.elements = this.elements.filter(el => !toDelete.has(el));
             this.selectedElements = [];
             this.render();
 
@@ -1578,31 +1639,48 @@ class CanvasEngine {
     }
 
     findElementAt(worldX, worldY) {
+        // First pass: check frame headers (name area above frame) — highest priority
         for (let i = this.elements.length - 1; i >= 0; i--) {
             const el = this.elements[i];
+            if (el.type === 'frame' && this.isOnFrameHeader(el, worldX, worldY)) {
+                return el;
+            }
+        }
+
+        // Second pass: check non-frame elements (children should be found before their parent frame)
+        for (let i = this.elements.length - 1; i >= 0; i--) {
+            const el = this.elements[i];
+            if (el.type === 'frame') continue; // Skip frames in this pass
 
             if (el.type === 'shape' && el.shapeType === 'line') {
-                // Line hit detection
                 const threshold = 5 / this.viewport.scale;
                 const dist = this.pointToLineDistance(worldX, worldY, el.x, el.y, el.x2, el.y2);
                 if (dist < threshold) return el;
             } else if (el.type === 'path') {
-                // Path hit detection using bounding box with padding
                 const bounds = this.getPathBounds(el);
                 const padding = 5 / this.viewport.scale;
-
                 if (worldX >= bounds.x - padding && worldX <= bounds.x + bounds.width + padding &&
                     worldY >= bounds.y - padding && worldY <= bounds.y + bounds.height + padding) {
                     return el;
                 }
             } else {
-                // Bounding box hit detection
                 if (worldX >= el.x && worldX <= el.x + el.width &&
                     worldY >= el.y && worldY <= el.y + el.height) {
                     return el;
                 }
             }
         }
+
+        // Third pass: check frames (body area) — lowest priority so children are found first
+        for (let i = this.elements.length - 1; i >= 0; i--) {
+            const el = this.elements[i];
+            if (el.type !== 'frame') continue;
+            if (worldX >= el.x && worldX <= el.x + el.width &&
+                worldY >= el.y && worldY <= el.y + el.height) {
+                return el;
+            }
+        }
+
         return null;
     }
 
@@ -1661,10 +1739,46 @@ class CanvasEngine {
         this.ctx.translate(this.viewport.x, this.viewport.y);
         this.ctx.scale(this.viewport.scale, this.viewport.scale);
 
-        // Render all elements
+        // Render elements with frame clipping
+        // 1. Render non-parented, non-frame elements first (below frames)
         this.elements.forEach(el => {
-            if (el !== this.tempElement) {
-                this.renderElement(el);
+            if (el === this.tempElement) return;
+            if (el.type === 'frame') return;
+            if (el.parentFrame) return; // Skip children, rendered with their frame
+            this.renderElement(el);
+        });
+
+        // 2. Render frames and their children (with clipping)
+        this.elements.forEach(el => {
+            if (el === this.tempElement) return;
+            if (el.type !== 'frame') return;
+
+            // Render the frame itself
+            this.renderElement(el);
+
+            // Render frame highlight during drag
+            if (this.highlightedFrame === el) {
+                this.ctx.save();
+                this.ctx.strokeStyle = '#0099B8';
+                this.ctx.lineWidth = 3 / this.viewport.scale;
+                this.ctx.setLineDash([]);
+                this.ctx.strokeRect(el.x, el.y, el.width, el.height);
+                this.ctx.restore();
+            }
+
+            // Render children clipped to frame bounds
+            const children = this.getFrameChildren(el);
+            if (children.length > 0) {
+                this.ctx.save();
+                this.ctx.beginPath();
+                this.ctx.rect(el.x, el.y, el.width, el.height);
+                this.ctx.clip();
+                children.forEach(child => {
+                    if (child !== this.tempElement) {
+                        this.renderElement(child);
+                    }
+                });
+                this.ctx.restore();
             }
         });
 
@@ -1673,7 +1787,7 @@ class CanvasEngine {
             this.renderElement(this.tempElement);
         }
 
-        // Render selection
+        // Render selection (unclipped so handles are always visible)
         this.selectedElements.forEach(el => this.renderSelection(el));
 
         // Render drag selection box
@@ -2181,6 +2295,102 @@ class CanvasEngine {
         }
 
         this.ctx.setLineDash([]);
+    }
+
+    // ==================== Frame Container Logic ====================
+
+    // Get all children of a frame
+    getFrameChildren(frame) {
+        return this.elements.filter(el => el.parentFrame === frame);
+    }
+
+    // Find the topmost frame at a world position (excluding specified elements)
+    getFrameAt(worldX, worldY, excludeElements = []) {
+        for (let i = this.elements.length - 1; i >= 0; i--) {
+            const el = this.elements[i];
+            if (el.type !== 'frame') continue;
+            if (excludeElements.includes(el)) continue;
+            if (worldX >= el.x && worldX <= el.x + el.width &&
+                worldY >= el.y && worldY <= el.y + el.height) {
+                return el;
+            }
+        }
+        return null;
+    }
+
+    // Calculate what percentage of element's area is inside a frame
+    getOverlapPercent(element, frame) {
+        const elLeft = element.x;
+        const elRight = element.x + element.width;
+        const elTop = element.y;
+        const elBottom = element.y + element.height;
+
+        const frLeft = frame.x;
+        const frRight = frame.x + frame.width;
+        const frTop = frame.y;
+        const frBottom = frame.y + frame.height;
+
+        // Calculate intersection
+        const overlapLeft = Math.max(elLeft, frLeft);
+        const overlapRight = Math.min(elRight, frRight);
+        const overlapTop = Math.max(elTop, frTop);
+        const overlapBottom = Math.min(elBottom, frBottom);
+
+        if (overlapRight <= overlapLeft || overlapBottom <= overlapTop) {
+            return 0; // No overlap
+        }
+
+        const overlapArea = (overlapRight - overlapLeft) * (overlapBottom - overlapTop);
+        const elementArea = element.width * element.height;
+
+        if (elementArea <= 0) return 0;
+        return overlapArea / elementArea;
+    }
+
+    // Attach element to a frame
+    attachToFrame(element, frame) {
+        if (element === frame) return; // Can't parent to self
+        if (element.type === 'frame') return; // Frames can't be children (for now)
+        element.parentFrame = frame;
+    }
+
+    // Detach element from its parent frame
+    detachFromFrame(element) {
+        delete element.parentFrame;
+    }
+
+    // Check and update frame attachment for an element based on 50% overlap rule
+    updateFrameAttachment(element) {
+        if (element.type === 'frame') return; // Frames don't attach to other frames
+
+        let bestFrame = null;
+        let bestOverlap = 0;
+
+        // Find the frame with the most overlap
+        this.elements.forEach(el => {
+            if (el.type !== 'frame') return;
+            if (el === element) return;
+            const overlap = this.getOverlapPercent(element, el);
+            if (overlap > bestOverlap) {
+                bestOverlap = overlap;
+                bestFrame = el;
+            }
+        });
+
+        if (bestOverlap > 0.5 && bestFrame) {
+            this.attachToFrame(element, bestFrame);
+        } else {
+            this.detachFromFrame(element);
+        }
+    }
+
+    // Check if a world position is on a frame's header/name area
+    isOnFrameHeader(frame, worldX, worldY) {
+        const headerHeight = 20 / this.viewport.scale;
+        return worldX >= frame.x &&
+               worldX <= frame.x + frame.width &&
+               worldY >= frame.y - headerHeight &&
+               worldY < frame.y;
     }
 
     // Calculate bounding box for path
