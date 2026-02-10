@@ -46,12 +46,12 @@
     }
 
     // Model ID → API config mapping
-    // Proxied through server.py to bypass region restrictions
+    // Local dev: server.py proxies /api/generate → Gemini API
+    // Production: Cloudflare Worker handles /api/generate → Gemini API
     const MODEL_CONFIGS = {
         'nano-banana': {
-            apiKey: 'AIzaSyDwsn-H9GkEeAW1w3TUl-rJX_K_daTTkKQ',
             model: 'gemini-3-pro-image-preview',
-            baseUrl: '/api/gemini/v1beta',
+            endpoint: '/api/generate',
         },
         'seedream': null, // 暂未接入
     };
@@ -503,13 +503,13 @@
     }
 
     async function callGenerateApi(modelConfig, requestBody) {
-        const url = modelConfig.baseUrl + '/models/' + modelConfig.model
-            + ':generateContent?key=' + modelConfig.apiKey;
+        // Send model in body — the server/Worker uses it to build the Gemini URL
+        const payload = { ...requestBody, model: modelConfig.model };
 
-        const response = await fetch(url, {
+        const response = await fetch(modelConfig.endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
+            body: JSON.stringify(payload)
         });
 
         if (!response.ok) {

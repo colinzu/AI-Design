@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Local dev server with API proxy for AI-Design.
-Serves static files and proxies /api/gemini/* to Google Gemini API.
-Needed because Google API blocks certain regions.
+Serves static files and proxies /api/generate to Google Gemini API.
 
 Features:
 - Threaded: handles concurrent requests (4 parallel image generations)
 - Robust: survives client disconnects (BrokenPipeError, etc.)
+- Matches production API: /api/generate (same as Cloudflare Worker)
 """
 
 import http.server
@@ -18,7 +18,14 @@ import sys
 import signal
 
 PORT = 8080
-GEMINI_BASE = 'https://generativelanguage.googleapis.com'
+GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta'
+
+# API key for local development only.
+# In production, this is stored as a Cloudflare secret.
+GEMINI_API_KEY = 'AIzaSyDwsn-H9GkEeAW1w3TUl-rJX_K_daTTkKQ'
+
+# Allowed models (same whitelist as the Cloudflare Worker)
+ALLOWED_MODELS = ['gemini-3-pro-image-preview']
 
 
 class RobustThreadingHTTPServer(http.server.ThreadingHTTPServer):
@@ -38,8 +45,10 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     timeout = 30  # Close idle connections after 30s to free threads
 
     def do_POST(self):
-        if self.path.startswith('/api/gemini/'):
-            self._proxy_gemini()
+        if self.path == '/api/generate':
+            self._proxy_generate()
+        elif self.path.startswith('/api/gemini/'):
+            self._proxy_gemini_legacy()
         else:
             self.send_error(404, 'Not Found')
 
@@ -54,17 +63,56 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404, 'Not Found')
 
-    def _proxy_gemini(self):
-        """Proxy request to Gemini API. All responses go through _send_proxy_response."""
-        self.close_connection = True  # Don't keep-alive after proxy requests
-        # /api/gemini/v1beta/models/... → https://generativelanguage.googleapis.com/v1beta/models/...
+    def _proxy_generate(self):
+        """
+        POST /api/generate — matches the Cloudflare Worker API.
+        Reads 'model' from request body, injects API key, forwards to Gemini.
+        """
+        self.close_connection = True
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b''
+
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            error = json.dumps({'error': {'message': 'Invalid JSON body'}}).encode()
+            self._send_proxy_response(400, error, 'application/json')
+            return
+
+        # Validate required fields
+        if 'contents' not in body or 'generationConfig' not in body:
+            error = json.dumps({'error': {'message': 'Missing required fields'}}).encode()
+            self._send_proxy_response(400, error, 'application/json')
+            return
+
+        # Extract and validate model
+        model = body.pop('model', 'gemini-3-pro-image-preview')
+        if model not in ALLOWED_MODELS:
+            error = json.dumps({'error': {'message': f'Model not allowed: {model}'}}).encode()
+            self._send_proxy_response(400, error, 'application/json')
+            return
+
+        # Build Gemini API URL
+        target_url = f'{GEMINI_BASE}/models/{model}:generateContent?key={GEMINI_API_KEY}'
+        forward_body = json.dumps(body).encode()
+
+        self._forward_to_gemini(target_url, forward_body)
+
+    def _proxy_gemini_legacy(self):
+        """Legacy: /api/gemini/* direct proxy (kept for backward compatibility)."""
+        self.close_connection = True
         remote_path = self.path[len('/api/gemini'):]
-        target_url = GEMINI_BASE + remote_path
+        target_url = 'https://generativelanguage.googleapis.com' + remote_path
 
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length) if content_length > 0 else b''
 
-        headers = {'Content-Type': self.headers.get('Content-Type', 'application/json')}
+        self._forward_to_gemini(target_url, body)
+
+    def _forward_to_gemini(self, target_url, body):
+        """Forward a request to Gemini API and return the response."""
+        headers = {'Content-Type': 'application/json'}
 
         try:
             req = urllib.request.Request(target_url, data=body, headers=headers, method='POST')
@@ -124,7 +172,8 @@ if __name__ == '__main__':
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     server = RobustThreadingHTTPServer(('', PORT), ProxyHandler)
     print(f'🚀 AI-Design dev server at http://127.0.0.1:{PORT}')
-    print(f'   Gemini proxy: /api/gemini/* → {GEMINI_BASE}/*')
+    print(f'   API proxy: POST /api/generate → Gemini API')
+    print(f'   Legacy:    /api/gemini/* → Gemini API')
     print(f'   Threaded mode: concurrent requests supported')
     print(f'   Press Ctrl+C to stop\n')
     try:
