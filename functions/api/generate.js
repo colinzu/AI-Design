@@ -18,9 +18,8 @@ const ALLOWED_MODELS = [
     'gemini-3-pro-image-preview',
 ];
 
-// Allowed request origins (update after deploying)
+// Allowed request origins
 const ALLOWED_ORIGINS = [
-    'https://ai-design.pages.dev',
     'http://localhost:8080',
     'http://127.0.0.1:8080',
 ];
@@ -54,7 +53,8 @@ export async function onRequestPost(context) {
 
     // --- 2. Origin validation ---
     const origin = request.headers.get('Origin') || '';
-    const isAllowedOrigin = ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+    const isAllowedOrigin = ALLOWED_ORIGINS.some(o => origin.startsWith(o))
+        || /^https:\/\/[\w-]+\.pages\.dev$/.test(origin);
     // Also allow if origin header is missing (e.g. server-to-server calls)
     // but block explicitly wrong origins
     if (origin && !isAllowedOrigin) {
