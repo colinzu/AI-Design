@@ -149,15 +149,12 @@
         panel.addEventListener('pointerdown', (e) => e.stopPropagation());
         panel.addEventListener('wheel', (e) => e.stopPropagation());
 
-        // Close on outside click (but NOT when clicking canvas — user may be selecting images)
+        // Close on outside click
         document.addEventListener('click', (e) => {
             if (!inspState.isOpen) return;
             if (panel.contains(e.target)) return;
             const sb = document.querySelector('.sidebar-btn[data-action="inspiration"]');
             if (sb && sb.contains(e.target)) return;
-            // Don't close when clicking on canvas
-            const canvas = document.getElementById('infinite-canvas');
-            if (e.target === canvas) return;
             closePanel();
         });
     }
@@ -185,8 +182,15 @@
 
         panel.classList.remove('hidden');
         inspState.isOpen = true;
+        document.body.classList.add('insp-open');
 
-        if (sidebarBtn) sidebarBtn.classList.add('active');
+        if (sidebarBtn) {
+            sidebarBtn.classList.add('active');
+            sidebarBtn.removeAttribute('title'); // Hide native tooltip when panel is open
+        }
+
+        // Populate recents on first open
+        populateRecents();
 
         // Check if an image is selected on canvas → auto-detect intent
         const engine = window.canvasEngine;
@@ -206,18 +210,53 @@
         }
     }
 
+    // Populate recents from canvas images (on first open)
+    function populateRecents() {
+        const section = document.getElementById('insp-recents-section');
+        const scrollContainer = document.getElementById('insp-recents-scroll');
+        if (!scrollContainer || !section || scrollContainer.children.length > 0) return;
+
+        // Seed recents from images already on canvas
+        const engine = window.canvasEngine;
+        if (engine && engine.elements) {
+            const canvasImages = engine.elements
+                .filter(el => el.type === 'image' && el.src)
+                .slice(-6)
+                .reverse();
+
+            if (canvasImages.length > 0) {
+                canvasImages.forEach(img => {
+                    const item = document.createElement('div');
+                    item.className = 'insp-recent-item';
+                    const imgEl = document.createElement('img');
+                    imgEl.src = img.src;
+                    imgEl.alt = '';
+                    imgEl.loading = 'lazy';
+                    imgEl.draggable = false;
+                    item.appendChild(imgEl);
+                    scrollContainer.appendChild(item);
+                });
+                section.classList.add('has-items');
+            }
+        }
+    }
+
     function closePanel() {
         const panel = document.getElementById('inspiration-panel');
         const sidebarBtn = document.querySelector('.sidebar-btn[data-action="inspiration"]');
 
         panel.classList.add('hidden');
         inspState.isOpen = false;
+        document.body.classList.remove('insp-open');
 
-        if (sidebarBtn) sidebarBtn.classList.remove('active');
+        if (sidebarBtn) {
+            sidebarBtn.classList.remove('active');
+            sidebarBtn.setAttribute('title', 'Inspiration'); // Restore tooltip when panel closed
+        }
 
-        // Hide intent banner
-        const banner = document.getElementById('insp-intent-banner');
-        if (banner) banner.classList.add('hidden');
+        // Hide intent icon
+        const intentIcon = document.getElementById('insp-intent-icon');
+        if (intentIcon) intentIcon.classList.add('hidden');
     }
 
     // ==================== Image Intent Detection ====================
@@ -225,12 +264,14 @@
         if (inspState.isDetectingIntent) return;
         inspState.isDetectingIntent = true;
 
-        const banner = document.getElementById('insp-intent-banner');
-        const intentText = document.getElementById('insp-intent-text');
+        const searchIcon = document.querySelector('.insp-search-icon');
+        const intentIcon = document.getElementById('insp-intent-icon');
         const searchInput = document.getElementById('insp-search');
 
-        banner.classList.remove('hidden');
-        intentText.textContent = 'Analyzing image...';
+        // Show intent icon, hide search icon
+        searchIcon.classList.add('hidden');
+        intentIcon.classList.remove('hidden');
+        searchInput.placeholder = 'Analyzing image...';
 
         try {
             // Get image data
@@ -273,15 +314,15 @@
             }
 
             if (keywords) {
-                intentText.textContent = 'Similar to: ' + keywords;
                 inspState.intentQuery = keywords;
                 inspState.query = keywords;
                 searchInput.value = keywords;
+                searchInput.placeholder = 'Search inspiration...';
                 document.getElementById('insp-search-clear').classList.remove('hidden');
                 setActiveCategory('all');
                 resetAndSearch();
             } else {
-                banner.classList.add('hidden');
+                searchInput.placeholder = 'Search inspiration...';
                 if (!inspState.hasLoadedInitial) {
                     inspState.hasLoadedInitial = true;
                     resetAndSearch();
@@ -289,7 +330,7 @@
             }
         } catch (err) {
             console.warn('[inspiration] Intent detection failed:', err);
-            banner.classList.add('hidden');
+            searchInput.placeholder = 'Search inspiration...';
             // Fall back to loading default content
             if (!inspState.hasLoadedInitial) {
                 inspState.hasLoadedInitial = true;
@@ -297,6 +338,9 @@
             }
         } finally {
             inspState.isDetectingIntent = false;
+            // Restore search icon, hide intent icon
+            searchIcon.classList.remove('hidden');
+            intentIcon.classList.add('hidden');
         }
     }
 
@@ -492,6 +536,41 @@
         });
     }
 
+    // ==================== Recents Management ====================
+    function addToRecents(item) {
+        const section = document.getElementById('insp-recents-section');
+        const scrollContainer = document.getElementById('insp-recents-scroll');
+        if (!scrollContainer || !section) return;
+
+        // Avoid duplicates
+        const existing = scrollContainer.querySelector(`[data-recent-id="${item.id}"]`);
+        if (existing) return;
+
+        const div = document.createElement('div');
+        div.className = 'insp-recent-item';
+        div.dataset.recentId = item.id;
+
+        const img = document.createElement('img');
+        img.src = item.thumbUrl;
+        img.alt = item.alt || '';
+        img.loading = 'lazy';
+        img.draggable = false;
+
+        div.appendChild(img);
+        div.addEventListener('click', () => addToCanvas(item));
+
+        // Insert at the beginning (most recent first)
+        scrollContainer.insertBefore(div, scrollContainer.firstChild);
+
+        // Show the recents section
+        section.classList.add('has-items');
+
+        // Keep max 10 recent items
+        while (scrollContainer.children.length > 10) {
+            scrollContainer.removeChild(scrollContainer.lastChild);
+        }
+    }
+
     // ==================== Add to Canvas ====================
     function addToCanvas(item) {
         const engine = window.canvasEngine;
@@ -499,6 +578,9 @@
 
         const url = item.fullUrl;
         if (!url) return;
+
+        // Add to recents
+        addToRecents(item);
 
         showAddFeedback();
 
@@ -512,7 +594,16 @@
             const selectedFrame = engine.selectedElements.find(el => el.type === 'frame');
 
             if (selectedFrame) {
-                // Fit image to cover the frame
+                // Replace existing images inside the frame (not stack)
+                const oldChildren = engine.elements.filter(
+                    el => el.parentFrame === selectedFrame && el.type === 'image'
+                );
+                oldChildren.forEach(child => {
+                    const idx = engine.elements.indexOf(child);
+                    if (idx !== -1) engine.elements.splice(idx, 1);
+                });
+
+                // Fit new image to cover the frame
                 const frameAspect = selectedFrame.width / selectedFrame.height;
                 const imgAspect = img.naturalWidth / img.naturalHeight;
 
@@ -526,18 +617,13 @@
                 x = selectedFrame.x + (selectedFrame.width - w) / 2;
                 y = selectedFrame.y + (selectedFrame.height - h) / 2;
             } else {
-                // Place at viewport center
-                const centerScreen = {
-                    x: window.innerWidth / 2,
-                    y: window.innerHeight / 2,
-                };
-                const worldPos = engine.screenToWorld(centerScreen.x, centerScreen.y);
+                // Place at next grid position (8-col, 30px gap)
+                w = img.naturalWidth;
+                h = img.naturalHeight;
 
-                w = Math.min(img.naturalWidth, 800);
-                h = w * (img.naturalHeight / img.naturalWidth);
-
-                x = worldPos.x - w / 2;
-                y = worldPos.y - h / 2;
+                const pos = engine.getNextGridPosition(w, h, 30);
+                x = pos.x;
+                y = pos.y;
             }
 
             const element = {
@@ -550,8 +636,18 @@
                 src: url,
             };
 
+            // Attach to frame if placed inside one
+            if (selectedFrame) {
+                element.parentFrame = selectedFrame;
+            }
+
             engine.elements.push(element);
             engine.selectedElements = [element];
+
+            // Scroll canvas so new image is centered on screen (unless placed into a frame)
+            if (!selectedFrame) {
+                engine.scrollToCenter(x, y, w, h);
+            }
             engine.render();
 
             if (engine.onSelectionChange) {
@@ -568,11 +664,9 @@
     }
 
     function showAddFeedback() {
-        const panel = document.getElementById('inspiration-panel');
-        panel.style.boxShadow = '0 8px 32px rgba(0, 200, 200, 0.25), 0 2px 8px rgba(0, 0, 0, 0.06)';
-        setTimeout(() => {
-            panel.style.boxShadow = '';
-        }, 300);
+        // Brief highlight flash on the clicked item (handled by CSS :active),
+        // plus a subtle toast
+        showNotification('Added to canvas');
     }
 
     // ==================== Utilities ====================

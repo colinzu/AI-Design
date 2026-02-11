@@ -27,6 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const zoomMenu = document.getElementById('zoom-menu');
     const zoomDropdownBtn = document.getElementById('zoom-dropdown-btn');
     const shapeMenu = document.getElementById('shape-menu');
+    const inspirationPanel = document.getElementById('inspiration-panel');
+    const inspirationBtn = document.querySelector('.sidebar-btn[data-action="inspiration"]');
 
     document.addEventListener('click', (e) => {
         if (!projectMenu.contains(e.target) && e.target !== logoMenuBtn && !logoMenuBtn.contains(e.target)) {
@@ -39,6 +41,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const rectangleBtn = document.querySelector('.tool-btn[data-tool="rectangle"]');
             if (!rectangleBtn || (!rectangleBtn.contains(e.target) && e.target !== rectangleBtn)) {
                 shapeMenu.classList.add('hidden');
+            }
+        }
+        // Auto-hide inspiration panel when clicking canvas blank area
+        if (inspirationPanel && !inspirationPanel.classList.contains('hidden')) {
+            // Check if click is outside panel and not on the inspiration button
+            if (!inspirationPanel.contains(e.target) &&
+                (!inspirationBtn || (!inspirationBtn.contains(e.target) && e.target !== inspirationBtn))) {
+                // Close the panel
+                inspirationPanel.classList.add('hidden');
+                if (inspirationBtn) inspirationBtn.classList.remove('active');
+                // Hide intent icon
+                const intentIcon = document.getElementById('insp-intent-icon');
+                if (intentIcon) intentIcon.classList.add('hidden');
             }
         }
     });
@@ -99,10 +114,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ==================== Zoom Controls ====================
 
+    const zoomBarInput = document.getElementById('zoom-bar-input');
+
     if (zoomDropdownBtn) {
         zoomDropdownBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             zoomMenu.classList.toggle('hidden');
+            if (!zoomMenu.classList.contains('hidden')) {
+                updateZoomDisplay();
+                // Auto-focus input, select all digits
+                if (zoomBarInput) {
+                    setTimeout(() => {
+                        zoomBarInput.focus();
+                        zoomBarInput.select();
+                    }, 50);
+                }
+            }
         });
     }
 
@@ -110,6 +137,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (zoomMenu) {
         zoomMenu.addEventListener('click', (e) => {
             const menuItem = e.target.closest('.menu-item');
+            const barBtn = e.target.closest('.zoom-bar-btn');
+
+            if (barBtn) {
+                const action = barBtn.dataset.zoomAction;
+                if (action === 'in') {
+                    engine.zoom(100, canvas.width / 2, canvas.height / 2);
+                } else if (action === 'out') {
+                    engine.zoom(-100, canvas.width / 2, canvas.height / 2);
+                }
+                updateZoomDisplay();
+                return; // Don't close menu for bar buttons
+            }
+
             if (!menuItem) return;
 
             const zoom = menuItem.dataset.zoom;
@@ -125,9 +165,87 @@ document.addEventListener('DOMContentLoaded', () => {
                 engine.setZoom(parseFloat(zoom));
             }
 
+            updateZoomDisplay();
             zoomMenu.classList.add('hidden');
         });
     }
+
+    // Zoom bar input: only numbers, clamp to range
+    if (zoomBarInput) {
+        const minPct = Math.round(engine.viewport.minScale * 100);
+        const maxPct = Math.round(engine.viewport.maxScale * 100);
+
+        // Show raw number on focus, select all for easy replacement
+        zoomBarInput.addEventListener('focus', () => {
+            zoomBarInput.value = Math.round(engine.viewport.scale * 100);
+            setTimeout(() => zoomBarInput.select(), 0);
+        });
+
+        // Only allow digits, backspace, delete, arrows
+        zoomBarInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                applyZoomInput();
+                zoomBarInput.blur();
+                return;
+            }
+            if (e.key === 'Escape') {
+                updateZoomDisplay();
+                zoomBarInput.blur();
+                return;
+            }
+            // Allow: digits, backspace, delete, arrows, tab, select-all
+            const allowed = ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab'];
+            if (allowed.includes(e.key)) { e.stopPropagation(); return; }
+            if ((e.metaKey || e.ctrlKey) && e.key === 'a') { e.stopPropagation(); return; }
+            if (!/^\d$/.test(e.key)) {
+                e.preventDefault();
+            }
+            e.stopPropagation();
+        });
+
+        // Strip non-digits on input (catches paste, IME, etc.)
+        zoomBarInput.addEventListener('input', () => {
+            zoomBarInput.value = zoomBarInput.value.replace(/[^\d]/g, '');
+        });
+
+        // Apply on blur
+        zoomBarInput.addEventListener('blur', () => {
+            applyZoomInput();
+        });
+
+        // Prevent canvas interactions
+        zoomBarInput.addEventListener('mousedown', (e) => e.stopPropagation());
+        zoomBarInput.addEventListener('pointerdown', (e) => e.stopPropagation());
+    }
+
+    function applyZoomInput() {
+        if (!zoomBarInput) return;
+        const raw = zoomBarInput.value.replace('%', '').trim();
+        let num = parseInt(raw, 10);
+        if (isNaN(num) || num <= 0) {
+            updateZoomDisplay();
+            return;
+        }
+        // Clamp to engine's min/max scale range
+        const minPct = Math.round(engine.viewport.minScale * 100);
+        const maxPct = Math.round(engine.viewport.maxScale * 100);
+        num = Math.max(minPct, Math.min(maxPct, num));
+        engine.setZoom(num / 100);
+        updateZoomDisplay();
+    }
+
+    // Sync zoom display in both places
+    function updateZoomDisplay() {
+        const pct = Math.round(engine.viewport.scale * 100) + '%';
+        const zoomDisplay = document.getElementById('zoom-display');
+        if (zoomDisplay) zoomDisplay.textContent = pct;
+        if (zoomBarInput && document.activeElement !== zoomBarInput) {
+            zoomBarInput.value = pct;
+        }
+    }
+
+    window._updateZoomDisplay = updateZoomDisplay;
 
     // ==================== Toolbar Setup ====================
 
@@ -223,12 +341,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (e.defaultPrevented) return;
 
-        // Tool shortcuts (skip if editing text or gen-panel input is focused)
-        if (!engine.editingText && !engine.isInputActive()) {
+        // Tool shortcuts (only single key, no modifiers)
+        if (!engine.editingText && !engine.isInputActive() &&
+            !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
             const toolMap = {
                 'v': 'move',
                 'h': 'hand',
-                'f': 'frame', // Frame tool (renamed from Page)
+                'f': 'frame',
                 'i': 'image',
                 't': 'text',
                 'r': 'rectangle',
@@ -236,25 +355,43 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             if (toolMap[e.key.toLowerCase()]) {
-                // If handled by engine, let it be. But here we can redundant check...
-                // Actually, if defaultPrevented, we already returned.
-                // So this only runs if engine DIDN'T handle it.
-                // But wait, engine handles all these.
-                // So this block is redundant if we assume engine handles them.
-                // But for safety/other tools engine might miss?
-                // For now, update map and prevent default.
-
                 e.preventDefault();
                 const tool = toolMap[e.key.toLowerCase()];
                 engine.setTool(tool);
 
-                // Update UI (redundant as engine updates UI, but safe)
                 toolButtons.forEach(b => {
                     b.classList.remove('active');
                     if (b.dataset.tool === tool) {
                         b.classList.add('active');
                     }
                 });
+            }
+        }
+
+        // Zoom shortcuts (Shift + key, use e.code for reliable detection)
+        if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
+            !engine.editingText && !engine.isInputActive()) {
+            const zoomShortcuts = {
+                'KeyF': 'fit',
+                'Digit0': 0.5,
+                'Digit1': 1.0,
+                'Digit2': 2.0,
+                'Equal': 'in',     // Shift + = (which is +)
+                'Minus': 'out',    // Shift + -
+            };
+            if (e.code in zoomShortcuts) {
+                e.preventDefault();
+                const val = zoomShortcuts[e.code];
+                if (val === 'fit') {
+                    engine.fitToScreen();
+                } else if (val === 'in') {
+                    engine.zoom(100, canvas.width / 2, canvas.height / 2);
+                } else if (val === 'out') {
+                    engine.zoom(-100, canvas.width / 2, canvas.height / 2);
+                } else {
+                    engine.setZoom(val);
+                }
+                if (window._updateZoomDisplay) window._updateZoomDisplay();
             }
         }
     });
@@ -331,6 +468,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (engine.selectedElements.length === 1 && frame) {
                 updateActionBarPosition(frame);
             }
+            // Keep zoom display in sync
+            if (window._updateZoomDisplay) window._updateZoomDisplay();
         };
 
         function updateActionBarPosition(frame) {

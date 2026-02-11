@@ -1,24 +1,25 @@
 /**
- * Canvas Generation Panel — AI Image Generation Input
- * Manages the generation input panel that appears below selected elements.
- * Three states: collapsed (capsule), expanded (full input), thinking (loading).
- * Calls Nano Banana Pro via Google Gemini generateContent API.
+ * Canvas Generation Panel — Multi-Instance AI Image Generation
+ *
+ * Each selected element (or group of elements) gets its own independent panel instance.
+ * Multiple panels can exist simultaneously — a panel in "Thinking" state persists
+ * while the user selects other elements and starts new generations.
+ *
+ * Architecture:
+ *   panelRegistry = Map<key, PanelInstance>
+ *   Each PanelInstance has its own DOM (cloned from <template>), state, and event listeners.
  */
 
 (function () {
-    // ==================== State ====================
-    const genState = {
-        selectedModel: 'nano-banana',
-        selectedModelName: 'Nano Banana Pro',
-        imageCount: 1,
-        uploadedImages: [],     // { index, src, name, fromSelection? }
-        isGenerating: false,
-        abortController: null,  // AbortController for cancelling generation
-        currentFrame: null,     // Reference to target frame for placing generated images
-        currentAnchor: null,    // { x, y, width, height } bounding box for positioning
-        panelMode: 'hidden',    // 'hidden' | 'collapsed' | 'expanded' | 'thinking'
-        selectedElements: [],   // Copy of selected elements for replacement logic
-    };
+    // ==================== Global Registry ====================
+    const panelRegistry = new Map(); // key → PanelInstance
+
+    // Cache recognized image labels: image src hash → label string
+    const imageLabelCache = new Map();
+
+    // Unique ID counter for inline chips
+    let _chipIdCounter = 0;
+    function nextChipId() { return 'chip-' + (++_chipIdCounter); }
 
     // Supported aspect ratios by Gemini API
     const SUPPORTED_RATIOS = [
@@ -33,9 +34,6 @@
         { label: '16:9',  value: 16 / 9 },
     ];
 
-    /**
-     * Find the closest supported aspect ratio for a given width/height.
-     */
     function getClosestAspectRatio(width, height) {
         const ratio = width / height;
         let closest = SUPPORTED_RATIOS[0];
@@ -51,142 +49,185 @@
     }
 
     // Model ID → API config mapping
-    // Local dev: server.py proxies /api/generate → Gemini API
-    // Production: Cloudflare Worker handles /api/generate → Gemini API
     const MODEL_CONFIGS = {
         'nano-banana': {
             model: 'gemini-3-pro-image-preview',
             endpoint: '/api/generate',
         },
-        'seedream': null, // 暂未接入
+        'seedream': null,
     };
 
-    // ==================== Initialization ====================
-    function initGenPanel() {
+    // ==================== Panel Instance Factory ====================
+
+    /**
+     * Compute a stable key for a set of selected elements.
+     * Uses element indices sorted so the same selection always produces the same key.
+     */
+    function getPanelKey(selectedElements) {
         const engine = window.canvasEngine;
-        if (!engine) {
-            console.warn('[canvas-gen] Canvas engine not available');
-            return;
+        if (!engine) return 'unknown';
+        const indices = selectedElements.map(el => engine.elements.indexOf(el)).sort((a, b) => a - b);
+        return indices.join(',');
+    }
+
+    /**
+     * Create a fresh panel state object.
+     */
+    function createPanelState() {
+        return {
+            isAutoMode: true,
+            selectedModel: null,       // null = auto
+            selectedModelName: 'Auto',
+            imageCount: 1,
+            uploadedImages: [],     // { index, src, name, fromSelection? }
+            isGenerating: false,
+            abortController: null,
+            currentFrame: null,
+            currentAnchor: null,
+            panelMode: 'hidden',
+            selectedElements: [],
+        };
+    }
+
+    /**
+     * Clone the template and create a new PanelInstance.
+     * Returns { key, dom, state, els }.
+     */
+    function createPanelInstance(key) {
+        const template = document.getElementById('gen-panel-template');
+        if (!template) {
+            console.error('[canvas-gen] gen-panel-template not found');
+            return null;
         }
 
-        const genPanel = document.getElementById('gen-panel');
-        if (!genPanel) return;
+        const clone = template.content.cloneNode(true);
+        const dom = clone.querySelector('.gen-panel');
 
-        // Chain into existing onSelectionChange (set by canvas.js for action bar)
-        const existingSelectionHandler = engine.onSelectionChange;
-        engine.onSelectionChange = (selectedElements) => {
-            // Call existing handler first (frame-action-bar logic)
-            if (existingSelectionHandler) existingSelectionHandler(selectedElements);
-
-            // Don't change panel if currently generating
-            if (genState.isGenerating) return;
-
-            if (selectedElements.length === 0) {
-                hideGenPanel();
-                return;
-            }
-
-            genState.selectedElements = [...selectedElements];
-            const frame = selectedElements.find(el => el.type === 'frame');
-
-            if (selectedElements.length === 1 && frame) {
-                // Selected a Frame
-                genState.currentFrame = frame;
-                genState.currentAnchor = frame;
-
-                // Check if frame is empty (no elements inside it)
-                const hasContent = engine.elements.some(el =>
-                    el !== frame && el.type !== 'frame' &&
-                    el.x >= frame.x && el.x + (el.width || 0) <= frame.x + frame.width &&
-                    el.y >= frame.y && el.y + (el.height || 0) <= frame.y + frame.height
-                );
-
-                if (!hasContent) {
-                    // Empty frame → expanded (active input, ready to type)
-                    showGenPanel('expanded');
-                    autoFocusEditor();
-                } else {
-                    // Frame has content → collapsed
-                    showGenPanel('collapsed');
-                }
-            } else {
-                // Selected non-frame content (images, shapes, etc.) → collapsed state
-                genState.currentFrame = findParentFrame(selectedElements);
-                genState.currentAnchor = getSelectionBounds(selectedElements);
-                collectSelectedAsReference(selectedElements);
-                showGenPanel('collapsed');
-            }
+        // Cache frequently accessed child elements
+        const els = {
+            collapsed:     dom.querySelector('.gen-collapsed'),
+            expanded:      dom.querySelector('.gen-expanded'),
+            thinking:      dom.querySelector('.gen-thinking'),
+            editor:        dom.querySelector('.gen-input-editor'),
+            uploadedImages: dom.querySelector('.gen-uploaded-images'),
+            addBtn:        dom.querySelector('.gen-add-btn'),
+            modelSelector: dom.querySelector('.gen-model-selector'),
+            countSelector: dom.querySelector('.gen-count-selector'),
+            countMenu:     dom.querySelector('.gen-count-menu'),
+            sendBtn:       dom.querySelector('.gen-send-btn'),
+            stopBtn:       dom.querySelector('.gen-stop-btn'),
+            countLabel:    dom.querySelector('.gen-count-label'),
+            modelLabel:    dom.querySelector('.gen-model-label'),
         };
 
-        // Chain into render loop for position updates
-        const existingRender = engine.render.bind(engine);
-        engine.render = () => {
-            existingRender();
-            if (genState.panelMode !== 'hidden' && genState.currentAnchor) {
-                updateGenPanelPosition(genState.currentAnchor);
-            }
+        const instance = {
+            key,
+            dom,
+            state: createPanelState(),
+            els,
         };
 
-        // Setup event listeners
-        setupGenPanelEvents();
+        // Bind events scoped to this instance
+        bindPanelEvents(instance);
 
-        console.log('[canvas-gen] Generation panel initialized');
+        // Insert into the page (append to body so it's above other content)
+        document.body.appendChild(dom);
+
+        // Move count menu to body so position:fixed works
+        // (gen-panel has transform which breaks fixed positioning for children)
+        if (els.countMenu && els.countMenu.parentNode) {
+            els.countMenu.parentNode.removeChild(els.countMenu);
+            document.body.appendChild(els.countMenu);
+        }
+
+        return instance;
+    }
+
+    /**
+     * Get or create a panel for a given key.
+     */
+    function getOrCreatePanel(key) {
+        if (panelRegistry.has(key)) {
+            return panelRegistry.get(key);
+        }
+        const instance = createPanelInstance(key);
+        if (instance) {
+            panelRegistry.set(key, instance);
+        }
+        return instance;
+    }
+
+    /**
+     * Remove a panel from the registry and DOM.
+     */
+    function removePanel(key) {
+        const instance = panelRegistry.get(key);
+        if (!instance) return;
+        if (instance.dom.parentNode) {
+            instance.dom.parentNode.removeChild(instance.dom);
+        }
+        // Also remove the count menu (moved to body)
+        if (instance.els.countMenu && instance.els.countMenu.parentNode) {
+            instance.els.countMenu.parentNode.removeChild(instance.els.countMenu);
+        }
+        panelRegistry.delete(key);
     }
 
     // ==================== Panel Show / Hide / State ====================
 
-    /**
-     * Show the gen panel in a specific mode: 'collapsed', 'expanded', or 'thinking'
-     */
-    function showGenPanel(mode) {
-        const genPanel = document.getElementById('gen-panel');
-        genPanel.classList.remove('hidden', 'collapsed', 'expanded', 'thinking');
-        genPanel.classList.add(mode);
-        genState.panelMode = mode;
-        if (genState.currentAnchor) {
-            updateGenPanelPosition(genState.currentAnchor);
+    function showPanel(instance, mode) {
+        const { dom, state } = instance;
+        dom.classList.remove('hidden', 'collapsed', 'expanded', 'thinking');
+        dom.classList.add(mode);
+        state.panelMode = mode;
+        if (state.currentAnchor) {
+            updatePanelPosition(instance);
         }
     }
 
-    function hideGenPanel() {
-        const genPanel = document.getElementById('gen-panel');
-        genPanel.classList.remove('collapsed', 'expanded', 'thinking');
-        genPanel.classList.add('hidden');
-        genState.panelMode = 'hidden';
-        genState.currentFrame = null;
-        genState.currentAnchor = null;
-        hideGenModelPicker();
-        hideGenCountMenu();
+    function hidePanel(instance) {
+        const { dom, state } = instance;
+        dom.classList.remove('collapsed', 'expanded', 'thinking');
+        dom.classList.add('hidden');
+        state.panelMode = 'hidden';
+        hideModelPicker(instance);
+        hideCountMenu(instance);
     }
 
-    function updateGenPanelPosition(anchor) {
+    function updatePanelPosition(instance) {
         const engine = window.canvasEngine;
-        const genPanel = document.getElementById('gen-panel');
-        if (!engine || !genPanel) return;
+        const { dom, state } = instance;
+        if (!engine || !state.currentAnchor) return;
 
-        // Position below anchor center
+        const anchor = state.currentAnchor;
         const worldCenterX = anchor.x + anchor.width / 2;
         const worldBottomY = anchor.y + anchor.height;
         const screenPos = engine.worldToScreen(worldCenterX, worldBottomY);
 
         if (!screenPos || typeof screenPos.x !== 'number') return;
 
-        genPanel.style.left = screenPos.x + 'px';
-        genPanel.style.top = (screenPos.y + 16) + 'px'; // 16px gap below element
+        dom.style.left = screenPos.x + 'px';
+        dom.style.top = (screenPos.y + 16) + 'px';
     }
 
-    function autoFocusEditor() {
-        const editor = document.getElementById('gen-input-editor');
-        if (editor) {
-            requestAnimationFrame(() => editor.focus());
+    function autoFocusEditor(instance) {
+        const { els } = instance;
+        if (els.editor) {
+            requestAnimationFrame(() => {
+                els.editor.focus();
+                // Place cursor at the end (after inline chips)
+                const sel = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(els.editor);
+                range.collapse(false); // collapse to end
+                sel.removeAllRanges();
+                sel.addRange(range);
+            });
         }
     }
 
     // ==================== Selection Helpers ====================
 
-    /**
-     * Find the parent frame that contains the selected elements (by coordinate overlap).
-     */
     function findParentFrame(elements) {
         const engine = window.canvasEngine;
         if (!engine) return null;
@@ -194,7 +235,6 @@
         const bounds = getSelectionBounds(elements);
         const frames = engine.elements.filter(el => el.type === 'frame');
 
-        // Find frame whose bounds contain the selection center
         const cx = bounds.x + bounds.width / 2;
         const cy = bounds.y + bounds.height / 2;
 
@@ -207,9 +247,6 @@
         return null;
     }
 
-    /**
-     * Get the bounding box of selected elements.
-     */
     function getSelectionBounds(elements) {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const el of elements) {
@@ -222,17 +259,22 @@
     }
 
     /**
-     * Collect selected image elements as reference images for the gen panel.
+     * Collect selected image elements as reference images for a panel instance.
      */
-    function collectSelectedAsReference(elements) {
-        // Remove previous auto-collected images, keep user-uploaded ones
-        genState.uploadedImages = genState.uploadedImages.filter(img => !img.fromSelection);
+    function collectSelectedAsReference(instance, elements) {
+        const { state, els } = instance;
+        // Remove previous auto-collected images from state, keep user-uploaded ones
+        state.uploadedImages = state.uploadedImages.filter(img => !img.fromSelection);
+
+        // Remove existing selection-based inline chips from editor (keep user-uploaded ones)
+        if (els.editor) {
+            els.editor.querySelectorAll('.gen-inline-chip[data-from-selection]').forEach(c => c.remove());
+        }
 
         for (const el of elements) {
             if (el.type === 'image' && el.image) {
                 try {
                     const tempCanvas = document.createElement('canvas');
-                    // Cap resolution for performance
                     const scale = Math.min(1, 1024 / Math.max(el.width, el.height));
                     tempCanvas.width = Math.round(el.width * scale);
                     tempCanvas.height = Math.round(el.height * scale);
@@ -240,205 +282,373 @@
                     ctx.drawImage(el.image, 0, 0, tempCanvas.width, tempCanvas.height);
                     const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.85);
 
-                    genState.uploadedImages.push({
-                        index: genState.uploadedImages.length + 1,
+                    // Create a small thumbnail for inline chip (smaller size)
+                    const thumbCanvas = document.createElement('canvas');
+                    const thumbSize = 64;
+                    const aspect = el.width / el.height;
+                    thumbCanvas.width = aspect >= 1 ? thumbSize : Math.round(thumbSize * aspect);
+                    thumbCanvas.height = aspect >= 1 ? Math.round(thumbSize / aspect) : thumbSize;
+                    const thumbCtx = thumbCanvas.getContext('2d');
+                    thumbCtx.drawImage(el.image, 0, 0, thumbCanvas.width, thumbCanvas.height);
+                    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.7);
+
+                    const imgData = {
+                        chipId: nextChipId(),
                         src: dataUrl,
-                        name: 'Selected image',
+                        thumb: thumbUrl,
+                        name: 'image',
                         fromSelection: true
-                    });
+                    };
+                    state.uploadedImages.push(imgData);
+
+                    // Insert inline chip into editor
+                    if (els.editor) {
+                        insertInlineChip(instance, imgData, els.editor);
+                    }
+
+                    // Recognize the image asynchronously
+                    recognizeImageLabel(imgData, instance);
                 } catch (err) {
                     console.warn('[canvas-gen] Failed to export selected image:', err);
                 }
             }
         }
-        renderGenUploadedImages();
-        updateGenSendState();
+        renderUploadedImages(instance);
+        updateSendState(instance);
     }
 
-    // ==================== Event Listeners ====================
-    function setupGenPanelEvents() {
-        const genPanel = document.getElementById('gen-panel');
-        const collapsed = document.getElementById('gen-collapsed');
-        const editor = document.getElementById('gen-input-editor');
-        const addBtn = document.getElementById('gen-add-btn');
-        const modelSelector = document.getElementById('gen-model-selector');
-        const countSelector = document.getElementById('gen-count-selector');
-        const countMenu = document.getElementById('gen-count-menu');
-        const sendBtn = document.getElementById('gen-send-btn');
-        const stopBtn = document.getElementById('gen-stop-btn');
+    /**
+     * Insert an inline image chip into the contenteditable editor.
+     */
+    /**
+     * Insert an inline image chip into the contenteditable editor.
+     * @param {string} position - 'start' to insert at beginning, 'end' to append at end
+     */
+    /**
+     * Insert an inline image chip into the contenteditable editor.
+     * @param {string} position - 'start', 'end', or 'cursor' (insert at saved cursor position)
+     */
+    function insertInlineChip(instance, imgData, editor, position = 'start') {
+        const chip = document.createElement('span');
+        chip.className = 'gen-inline-chip';
+        chip.contentEditable = 'false';
+        chip.dataset.chipId = imgData.chipId;
+        if (imgData.fromSelection) chip.dataset.fromSelection = 'true';
+
+        const thumb = document.createElement('img');
+        thumb.src = imgData.thumb;
+        thumb.className = 'gen-chip-thumb';
+        thumb.draggable = false;
+
+        const label = document.createElement('span');
+        label.className = 'gen-chip-label';
+        label.textContent = imgData.name || 'image';
+
+        chip.appendChild(thumb);
+        chip.appendChild(label);
+
+        const space = document.createTextNode('\u00A0');
+
+        if (position === 'cursor' && instance._savedRange) {
+            // Insert at saved cursor position
+            const range = instance._savedRange;
+            range.collapse(false);
+            range.insertNode(space);
+            range.insertNode(chip);
+            // Move cursor after the space
+            const sel = window.getSelection();
+            const newRange = document.createRange();
+            newRange.setStartAfter(space);
+            newRange.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(newRange);
+            instance._savedRange = null;
+        } else if (position === 'start' && editor.firstChild) {
+            editor.insertBefore(chip, editor.firstChild);
+            chip.after(space);
+        } else {
+            editor.appendChild(chip);
+            chip.after(space);
+        }
+        // Update placeholder visibility
+        updateEditorPlaceholder(editor);
+    }
+
+    /**
+     * Get a cache key from image data URL.
+     * Uses a hash of the full base64 data to ensure uniqueness across all images.
+     */
+    function getImageCacheKey(src) {
+        // Simple string hash for uniqueness
+        let hash = 0;
+        const str = src.length > 500 ? src.slice(-500) + src.slice(100, 300) : src;
+        for (let i = 0; i < str.length; i++) {
+            const ch = str.charCodeAt(i);
+            hash = ((hash << 5) - hash) + ch;
+            hash = hash & hash; // Convert to 32bit integer
+        }
+        return 'img_' + hash + '_' + src.length;
+    }
+
+    /**
+     * Update the chip label in the editor DOM.
+     */
+    function updateChipLabel(instance, imgData, labelText) {
+        imgData.name = labelText;
+        if (instance.els.editor) {
+            const chip = instance.els.editor.querySelector(
+                `.gen-inline-chip[data-chip-id="${imgData.chipId}"]`
+            );
+            if (chip) {
+                const chipLabel = chip.querySelector('.gen-chip-label');
+                if (chipLabel) chipLabel.textContent = labelText;
+            }
+        }
+    }
+
+    /**
+     * Recognize image label with caching. Cached labels are reused immediately.
+     */
+    async function recognizeImageLabel(imgData, instance) {
+        const cacheKey = getImageCacheKey(imgData.src);
+
+        // Check cache first
+        if (imageLabelCache.has(cacheKey)) {
+            updateChipLabel(instance, imgData, imageLabelCache.get(cacheKey));
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/describe-image', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ imageData: imgData.src })
+            });
+            if (!resp.ok) return;
+
+            const result = await resp.json();
+            const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!text) return;
+
+            // Take the first keyword as the label
+            const keywords = text.split(',').map(k => k.trim()).filter(Boolean);
+            const label = keywords[0] || 'image';
+            const labelText = label.charAt(0).toUpperCase() + label.slice(1);
+
+            // Store in cache
+            imageLabelCache.set(cacheKey, labelText);
+
+            updateChipLabel(instance, imgData, labelText);
+        } catch (err) {
+            console.warn('[canvas-gen] Image recognition failed:', err);
+        }
+    }
+
+    // ==================== Event Binding (per instance) ====================
+
+    function bindPanelEvents(instance) {
+        const { dom, els } = instance;
 
         // Collapsed capsule click → expand
-        collapsed.addEventListener('click', (e) => {
+        els.collapsed.addEventListener('click', (e) => {
             e.stopPropagation();
-            showGenPanel('expanded');
-            autoFocusEditor();
+            showPanel(instance, 'expanded');
+            autoFocusEditor(instance);
         });
 
         // Stop button → abort generation
-        stopBtn.addEventListener('click', (e) => {
+        els.stopBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (genState.abortController) {
-                genState.abortController.abort();
+            if (instance.state.abortController) {
+                instance.state.abortController.abort();
             }
         });
 
-        // 1. Prompt input → update send button state
-        editor.addEventListener('input', updateGenSendState);
+        // Prompt input → update send button state
+        els.editor.addEventListener('input', () => updateSendState(instance));
 
-        // 2. Add button → file upload
-        addBtn.addEventListener('click', (e) => {
+        // Add button → file upload (save cursor position before dialog opens)
+        els.addBtn.addEventListener('click', (e) => {
             e.stopPropagation();
+            // Save current cursor position in the editor
+            const sel = window.getSelection();
+            if (sel.rangeCount > 0 && els.editor.contains(sel.anchorNode)) {
+                instance._savedRange = sel.getRangeAt(0).cloneRange();
+            }
             const input = document.createElement('input');
             input.type = 'file';
             input.accept = 'image/jpeg,image/png,image/gif,image/webp';
             input.multiple = true;
-            input.onchange = (ev) => handleGenFileUpload(ev.target.files);
+            input.onchange = (ev) => handleFileUpload(instance, ev.target.files);
             input.click();
         });
 
-        // 3. Model selector → show model picker
-        modelSelector.addEventListener('click', (e) => {
+        // Model selector → show model picker
+        els.modelSelector.addEventListener('click', (e) => {
             e.stopPropagation();
-            toggleGenModelPicker();
+            toggleModelPicker(instance);
         });
 
-        // 4. Image count selector → show count menu
-        countSelector.addEventListener('click', (e) => {
+        // Image count selector → show count menu
+        els.countSelector.addEventListener('click', (e) => {
             e.stopPropagation();
-            toggleGenCountMenu();
+            toggleCountMenu(instance);
         });
 
-        // 5. Count menu items
-        countMenu.addEventListener('click', (e) => {
+        // Count menu items
+        els.countMenu.addEventListener('click', (e) => {
             const item = e.target.closest('.menu-item');
             if (!item) return;
             const count = parseInt(item.dataset.count);
-            genState.imageCount = count;
-            updateCountDisplay();
-            hideGenCountMenu();
+            instance.state.imageCount = count;
+            updateCountDisplay(instance);
+            hideCountMenu(instance);
         });
 
-        // 6. Send button (use mousedown instead of click to avoid Enter key also triggering click)
-        sendBtn.addEventListener('mousedown', (e) => {
+        // Send button
+        els.sendBtn.addEventListener('mousedown', (e) => {
             e.preventDefault();
-            handleGenerate();
+            handleGenerate(instance);
         });
 
-        // 7. Enter key to send (without shift)
-        editor.addEventListener('keydown', (e) => {
+        // Enter key to send (without shift)
+        els.editor.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                handleGenerate();
+                handleGenerate(instance);
             }
         });
 
-        // 8. Close sub-menus on outside click
-        document.addEventListener('click', (e) => {
-            const modelPicker = document.getElementById('gen-model-picker');
+        // Close sub-menus on outside click (use document-level listener)
+        const outsideClickHandler = (e) => {
+            // Model picker
+            const modelPicker = dom.querySelector('.floating-picker');
             if (modelPicker && modelPicker.classList.contains('active') &&
-                !modelPicker.contains(e.target) && !modelSelector.contains(e.target)) {
-                hideGenModelPicker();
+                !modelPicker.contains(e.target) && !els.modelSelector.contains(e.target)) {
+                hideModelPicker(instance);
             }
-            if (!countMenu.classList.contains('hidden') &&
-                !countMenu.contains(e.target) && !countSelector.contains(e.target)) {
-                hideGenCountMenu();
+            // Count menu
+            if (!els.countMenu.classList.contains('hidden') &&
+                !els.countMenu.contains(e.target) && !els.countSelector.contains(e.target)) {
+                hideCountMenu(instance);
             }
-        });
+        };
+        document.addEventListener('click', outsideClickHandler);
+        // Store reference for potential cleanup
+        instance._outsideClickHandler = outsideClickHandler;
 
-        // 9. Prevent canvas events when interacting with gen panel
-        genPanel.addEventListener('mousedown', (e) => e.stopPropagation());
-        genPanel.addEventListener('pointerdown', (e) => e.stopPropagation());
-        genPanel.addEventListener('wheel', (e) => e.stopPropagation());
-        countMenu.addEventListener('mousedown', (e) => e.stopPropagation());
-        countMenu.addEventListener('pointerdown', (e) => e.stopPropagation());
+        // Prevent canvas events when interacting with gen panel
+        dom.addEventListener('mousedown', (e) => e.stopPropagation());
+        dom.addEventListener('pointerdown', (e) => e.stopPropagation());
+        dom.addEventListener('wheel', (e) => e.stopPropagation());
+        els.countMenu.addEventListener('mousedown', (e) => e.stopPropagation());
+        els.countMenu.addEventListener('pointerdown', (e) => e.stopPropagation());
     }
 
     // ==================== File Upload ====================
-    function handleGenFileUpload(files) {
-        const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    function handleFileUpload(instance, files) {
+        const MAX_FILE_SIZE = 10 * 1024 * 1024;
         const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
         Array.from(files).forEach(file => {
             if (!ALLOWED_TYPES.includes(file.type)) {
-                showGenNotification('Unsupported file type: ' + file.name);
+                showNotification('Unsupported file type: ' + file.name);
                 return;
             }
             if (file.size > MAX_FILE_SIZE) {
-                showGenNotification('File too large: ' + file.name + ' (max 10MB)');
+                showNotification('File too large: ' + file.name + ' (max 10MB)');
                 return;
             }
 
             const reader = new FileReader();
             reader.onload = (e) => {
-                const newIndex = genState.uploadedImages.length + 1;
-                genState.uploadedImages.push({
-                    index: newIndex,
-                    src: e.target.result,
-                    name: file.name
-                });
-                renderGenUploadedImages();
-                updateGenSendState();
+                const dataUrl = e.target.result;
+                // Create a thumbnail for the inline chip
+                const img = new Image();
+                img.onload = () => {
+                    const thumbCanvas = document.createElement('canvas');
+                    const thumbSize = 64;
+                    const aspect = img.naturalWidth / img.naturalHeight;
+                    thumbCanvas.width = aspect >= 1 ? thumbSize : Math.round(thumbSize * aspect);
+                    thumbCanvas.height = aspect >= 1 ? Math.round(thumbSize / aspect) : thumbSize;
+                    const ctx = thumbCanvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, thumbCanvas.width, thumbCanvas.height);
+                    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.7);
+
+                    // Extract short name from filename
+                    const shortName = file.name.replace(/\.[^.]+$/, '').slice(0, 15);
+
+                    const imgData = {
+                        chipId: nextChipId(),
+                        src: dataUrl,
+                        thumb: thumbUrl,
+                        name: shortName || 'image',
+                    };
+                    instance.state.uploadedImages.push(imgData);
+
+                    // Insert inline chip at cursor position (or end if no saved position)
+                    if (instance.els.editor) {
+                        insertInlineChip(instance, imgData, instance.els.editor,
+                            instance._savedRange ? 'cursor' : 'end');
+                    }
+                    updateSendState(instance);
+                };
+                img.src = dataUrl;
             };
             reader.readAsDataURL(file);
         });
     }
 
-    function renderGenUploadedImages() {
-        const container = document.getElementById('gen-uploaded-images');
-        container.innerHTML = '';
-
-        genState.uploadedImages.forEach((img, idx) => {
-            img.index = idx + 1;
-            const div = document.createElement('div');
-            div.className = 'gen-uploaded-image' + (img.fromSelection ? ' from-selection' : '');
-            div.innerHTML = `
-                <img src="${img.src}" alt="Ref ${img.index}">
-                <button class="gen-remove-btn" data-idx="${idx}">
-                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" stroke-width="3">
-                        <line x1="18" y1="6" x2="6" y2="18"/>
-                        <line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
-                </button>
-            `;
-            div.querySelector('.gen-remove-btn').addEventListener('click', (e) => {
-                e.stopPropagation();
-                genState.uploadedImages.splice(idx, 1);
-                renderGenUploadedImages();
-                updateGenSendState();
-            });
-            container.appendChild(div);
-        });
-    }
+    // No-op: all images are inline chips now
+    function renderUploadedImages() {}
 
     // ==================== Model Picker ====================
-    function toggleGenModelPicker() {
-        const picker = document.getElementById('gen-model-picker');
+    function toggleModelPicker(instance) {
+        const picker = instance.dom.querySelector('.floating-picker');
         if (picker && picker.classList.contains('active')) {
-            hideGenModelPicker();
+            hideModelPicker(instance);
         } else {
-            showGenModelPicker();
+            showModelPicker(instance);
         }
     }
 
-    function showGenModelPicker() {
-        let picker = document.getElementById('gen-model-picker');
+    function showModelPicker(instance) {
+        const { dom, state, els } = instance;
+
+        // Close count menu first (mutually exclusive)
+        hideCountMenu(instance);
+
+        let picker = dom.querySelector('.floating-picker');
         if (!picker) {
             picker = document.createElement('div');
-            picker.id = 'gen-model-picker';
             picker.className = 'floating-picker model-picker-panel';
-            document.getElementById('gen-expanded').appendChild(picker);
+            els.expanded.appendChild(picker);
 
-            // Prevent events from bubbling to canvas
             picker.addEventListener('mousedown', (e) => e.stopPropagation());
             picker.addEventListener('pointerdown', (e) => e.stopPropagation());
         }
 
-        // Render using shared MODELS array
+        renderModelPickerContent(picker, instance);
+
+        picker.classList.add('active');
+        picker.classList.remove('hidden');
+    }
+
+    function renderModelPickerContent(picker, instance) {
+        const { state } = instance;
         picker.innerHTML = `
-            <div class="picker-header"><span>Models</span></div>
+            <div class="picker-header">
+                <span>Models</span>
+                <div class="auto-toggle-inline">
+                    <span>Auto</span>
+                    <label class="toggle-switch-sm">
+                        <input type="checkbox" class="gen-auto-toggle" ${state.isAutoMode ? 'checked' : ''}>
+                        <span class="toggle-slider-sm"></span>
+                    </label>
+                </div>
+            </div>
             ${MODELS.map(m => `
-                <div class="picker-item model-item-picker ${genState.selectedModel === m.id ? 'selected' : ''}"
+                <div class="picker-item model-item-picker ${(state.isAutoMode || state.selectedModel === m.id) ? 'selected' : ''}"
                      data-model="${m.id}" data-name="${m.name}">
                     <div class="model-icon-sm">${m.icon}</div>
                     <div class="model-info-sm">
@@ -458,219 +668,404 @@
             `).join('')}
         `;
 
-        // Click handlers for model items
+        // Auto toggle handler
+        const autoToggle = picker.querySelector('.gen-auto-toggle');
+        if (autoToggle) {
+            autoToggle.addEventListener('change', (e) => {
+                state.isAutoMode = e.target.checked;
+                if (state.isAutoMode) {
+                    state.selectedModel = null;
+                    state.selectedModelName = 'Auto';
+                }
+                updateModelDisplay(instance);
+                renderModelPickerContent(picker, instance);
+            });
+        }
+
+        // Model item click handlers
         picker.querySelectorAll('.model-item-picker').forEach(item => {
             item.addEventListener('click', () => {
-                genState.selectedModel = item.dataset.model;
-                genState.selectedModelName = item.dataset.name;
-                updateGenModelDisplay();
-                hideGenModelPicker();
+                state.isAutoMode = false;
+                state.selectedModel = item.dataset.model;
+                state.selectedModelName = item.dataset.name;
+                updateModelDisplay(instance);
+                hideModelPicker(instance);
             });
         });
-
-        picker.classList.add('active');
-        picker.classList.remove('hidden');
     }
 
-    function hideGenModelPicker() {
-        const picker = document.getElementById('gen-model-picker');
+    function hideModelPicker(instance) {
+        const picker = instance.dom.querySelector('.floating-picker');
         if (picker) {
             picker.classList.remove('active');
             picker.classList.add('hidden');
         }
     }
 
-    function updateGenModelDisplay() {
-        const label = document.querySelector('.gen-model-label');
-        if (label) label.textContent = genState.selectedModelName;
+    function updateModelDisplay(instance) {
+        if (instance.els.modelLabel) {
+            instance.els.modelLabel.textContent = instance.state.selectedModelName;
+        }
     }
 
     // ==================== Image Count ====================
-    function toggleGenCountMenu() {
-        const menu = document.getElementById('gen-count-menu');
-        if (menu.classList.contains('hidden')) {
-            showGenCountMenu();
+    function toggleCountMenu(instance) {
+        if (instance.els.countMenu.classList.contains('hidden')) {
+            showCountMenu(instance);
         } else {
-            hideGenCountMenu();
+            hideCountMenu(instance);
         }
     }
 
-    function showGenCountMenu() {
-        const menu = document.getElementById('gen-count-menu');
-        const countSelector = document.getElementById('gen-count-selector');
-        const selectorRect = countSelector.getBoundingClientRect();
+    function showCountMenu(instance) {
+        const { els, state } = instance;
 
-        // Position above the count selector
-        menu.style.left = selectorRect.left + 'px';
-        menu.style.top = (selectorRect.top - 8) + 'px';
-        menu.style.transform = 'translateY(-100%)';
-        menu.classList.remove('hidden');
+        // Close model picker first (mutually exclusive)
+        hideModelPicker(instance);
+
+        const selectorRect = els.countSelector.getBoundingClientRect();
+
+        // Position above the count selector using fixed positioning
+        els.countMenu.style.left = selectorRect.left + 'px';
+        els.countMenu.style.top = (selectorRect.top - 8) + 'px';
+        els.countMenu.style.transform = 'translateY(-100%)';
+        els.countMenu.classList.remove('hidden');
 
         // Mark active item
-        menu.querySelectorAll('.menu-item').forEach(item => {
-            item.classList.toggle('active', parseInt(item.dataset.count) === genState.imageCount);
+        els.countMenu.querySelectorAll('.menu-item').forEach(item => {
+            item.classList.toggle('active', parseInt(item.dataset.count) === state.imageCount);
         });
     }
 
-    function hideGenCountMenu() {
-        const menu = document.getElementById('gen-count-menu');
-        if (menu) menu.classList.add('hidden');
+    function hideCountMenu(instance) {
+        if (instance.els.countMenu) {
+            instance.els.countMenu.classList.add('hidden');
+        }
     }
 
-    function updateCountDisplay() {
-        const label = document.querySelector('.gen-count-label');
-        if (label) {
-            label.textContent = genState.imageCount === 1
+    function updateCountDisplay(instance) {
+        if (instance.els.countLabel) {
+            instance.els.countLabel.textContent = instance.state.imageCount === 1
                 ? '1 Image'
-                : genState.imageCount + ' Images';
+                : instance.state.imageCount + ' Images';
         }
+    }
+
+    /**
+     * Auto-name a frame by recognizing the generated image content.
+     * Uses /api/describe-image to get a short descriptive name (≤20 chars).
+     */
+    async function autoNameFrame(frame, imageDataUrl) {
+        try {
+            const resp = await fetch('/api/describe-image', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ imageData: imageDataUrl })
+            });
+            if (!resp.ok) return;
+
+            const result = await resp.json();
+            const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!text) return;
+
+            // Take first 1-2 keywords as the frame name
+            const keywords = text.split(',').map(k => k.trim()).filter(Boolean);
+            let name = keywords.slice(0, 2).join(' ');
+            if (name.length > 20) name = name.slice(0, 20).trim();
+            name = name.charAt(0).toUpperCase() + name.slice(1);
+
+            frame.name = name || 'Generated';
+            if (window.canvasEngine) window.canvasEngine.render();
+        } catch (err) {
+            console.warn('[canvas-gen] Auto-naming frame failed:', err);
+        }
+    }
+
+    /**
+     * Extract the user-typed text from the editor, excluding inline chip text.
+     */
+    function getEditorPrompt(editor) {
+        if (!editor) return '';
+        // Clone editor to manipulate without affecting DOM
+        const clone = editor.cloneNode(true);
+        clone.querySelectorAll('.gen-inline-chip').forEach(c => c.remove());
+        return clone.textContent.trim();
     }
 
     // ==================== Send State ====================
-    function updateGenSendState() {
-        const sendBtn = document.getElementById('gen-send-btn');
-        const editor = document.getElementById('gen-input-editor');
-        const text = editor ? editor.textContent.trim() : '';
-        const hasContent = text.length > 0 || genState.uploadedImages.length > 0;
-        sendBtn.disabled = !hasContent;
+    function updateSendState(instance) {
+        const { els, state } = instance;
+        const text = getEditorPrompt(els.editor);
+        const hasContent = text.length > 0 || state.uploadedImages.length > 0;
+        els.sendBtn.disabled = !hasContent;
+        updateEditorPlaceholder(els.editor);
+    }
+
+    /**
+     * Toggle a 'show-placeholder' class on the editor when there's no typed text.
+     * This allows showing placeholder even when inline chips are present.
+     */
+    function updateEditorPlaceholder(editor) {
+        if (!editor) return;
+        const text = getEditorPrompt(editor);
+        if (text.length === 0) {
+            editor.classList.add('show-placeholder');
+        } else {
+            editor.classList.remove('show-placeholder');
+        }
     }
 
     // ==================== API Call & Generation ====================
-    async function handleGenerate() {
-        const editor = document.getElementById('gen-input-editor');
-        const prompt = editor ? editor.textContent.trim() : '';
-        const anchor = genState.currentAnchor;
+    async function handleGenerate(instance) {
+        const { els, state } = instance;
+        const prompt = getEditorPrompt(els.editor);
+        const anchor = state.currentAnchor;
 
         if (!anchor) return;
-        if (!prompt && genState.uploadedImages.length === 0) return;
+        if (!prompt && state.uploadedImages.length === 0) return;
 
-        // Get model config
-        const modelConfig = MODEL_CONFIGS[genState.selectedModel];
+        const modelId = state.isAutoMode ? 'nano-banana' : state.selectedModel;
+        const modelConfig = MODEL_CONFIGS[modelId];
         if (!modelConfig) {
-            showGenNotification('Selected model is not yet available.');
+            showNotification('Selected model is not yet available.');
             return;
         }
 
-        // Snapshot all context at generation start so each call is independent
+        const engine = window.canvasEngine;
+        if (!engine) return;
+
+        // Snapshot context
         const genContext = {
-            frame: genState.currentFrame,
+            frame: state.currentFrame,
             anchor: { ...anchor },
-            images: [...genState.uploadedImages],
-            imageCount: genState.imageCount,
-            selectedElements: [...genState.selectedElements],
+            images: [...state.uploadedImages],
+            imageCount: state.imageCount,
+            selectedElements: [...state.selectedElements],
         };
 
-        // Switch this panel to thinking state
-        genState.isGenerating = true;
-        showGenPanel('thinking');
+        state.isGenerating = true;
+        showPanel(instance, 'thinking');
 
-        // Create abort controller for this generation
         const abortController = new AbortController();
-        genState.abortController = abortController;
+        state.abortController = abortController;
+        els.sendBtn.disabled = true;
 
-        // Disable send button
-        const sendBtn = document.getElementById('gen-send-btn');
-        if (sendBtn) sendBtn.disabled = true;
+        // Determine generation mode
+        const sourceFrame = genContext.frame;
+        const selectedElements = genContext.selectedElements;
+        const isReplaceMode = sourceFrame && (
+            selectedElements.some(el => el !== sourceFrame && el.type !== 'frame') ||
+            engine.elements.some(el => el.parentFrame === sourceFrame && el.type === 'image')
+        );
 
-        try {
-            // Build Gemini generateContent request body
-            const parts = [];
+        const refRect = sourceFrame || genContext.anchor;
+        const FRAME_GAP = 30;
 
-            const textPrompt = prompt || 'Generate a high-quality image based on the reference image(s) provided.';
-            parts.push({ text: textPrompt });
+        // --- PRE-CREATE placeholder frames for multi-image (Bug 3) ---
+        const targetSlots = []; // { frame, isNew }
 
-            // Add reference images as inlineData
-            for (const img of genContext.images) {
-                const match = img.src.match(/^data:([^;]+);base64,(.+)$/);
-                if (match) {
-                    parts.push({
-                        inlineData: {
-                            mimeType: match[1],
-                            data: match[2]
-                        }
-                    });
-                }
+        if (isReplaceMode && sourceFrame) {
+            // Bug 4: Replace mode — mark source frame as loading (overlay on image)
+            sourceFrame._generating = true;
+            sourceFrame._genStartTime = performance.now();
+            targetSlots.push({ frame: sourceFrame, isNew: false });
+
+            // Additional images get new frames to the right
+            for (let i = 1; i < genContext.imageCount; i++) {
+                const pos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
+                const f = createEmptyFrame(engine, pos.x, pos.y, refRect.width, refRect.height, sourceFrame.fill);
+                f._generating = true;
+                f._genStartTime = performance.now();
+                targetSlots.push({ frame: f, isNew: true });
             }
+        } else if (sourceFrame) {
+            // Empty frame selected — first image goes into it
+            sourceFrame._generating = true;
+            sourceFrame._genStartTime = performance.now();
+            targetSlots.push({ frame: sourceFrame, isNew: false });
 
-            // Use frame or anchor dimensions for aspect ratio
-            const refRect = genContext.frame || genContext.anchor;
-            const aspectRatio = getClosestAspectRatio(refRect.width, refRect.height);
-
-            // Detect image size from prompt (default 1K, user can say "2k" or "4k")
-            let imageSize = '1K';
-            if (/\b4[kK]\b/.test(prompt)) imageSize = '4K';
-            else if (/\b2[kK]\b/.test(prompt)) imageSize = '2K';
-
-            const requestBody = {
-                contents: [{ parts: parts }],
-                generationConfig: {
-                    responseModalities: ['TEXT', 'IMAGE'],
-                    imageConfig: {
-                        aspectRatio: aspectRatio,
-                        imageSize: imageSize
-                    }
-                }
-            };
-
-            // Generate images sequentially
-            const successfulImages = [];
+            for (let i = 1; i < genContext.imageCount; i++) {
+                const pos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
+                const f = createEmptyFrame(engine, pos.x, pos.y, refRect.width, refRect.height, sourceFrame.fill);
+                f._generating = true;
+                f._genStartTime = performance.now();
+                targetSlots.push({ frame: f, isNew: true });
+            }
+        } else {
+            // No frame — create new frames
             for (let i = 0; i < genContext.imageCount; i++) {
-                if (abortController.signal.aborted) break;
+                const pos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
+                const f = createEmptyFrame(engine, pos.x, pos.y, refRect.width, refRect.height, '#FFFFFF');
+                f._generating = true;
+                f._genStartTime = performance.now();
+                targetSlots.push({ frame: f, isNew: true });
+            }
+        }
 
-                let lastError = null;
-                for (let attempt = 0; attempt < 3; attempt++) {
-                    if (abortController.signal.aborted) break;
-                    try {
-                        const result = await callGenerateApi(modelConfig, requestBody, abortController);
-                        if (result) successfulImages.push(result);
+        engine.render();
+        startFrameLoadingAnimation();
+
+        // --- Build request body ---
+        const parts = [];
+        const textPrompt = prompt || 'Generate a high-quality image based on the reference image(s) provided.';
+        parts.push({ text: textPrompt });
+
+        for (const img of genContext.images) {
+            const match = img.src.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) {
+                parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+            }
+        }
+
+        const aspectRatio = getClosestAspectRatio(refRect.width, refRect.height);
+        let imageSize = '1K';
+        if (/\b4[kK]\b/.test(prompt)) imageSize = '4K';
+        else if (/\b2[kK]\b/.test(prompt)) imageSize = '2K';
+
+        const requestBody = {
+            contents: [{ parts }],
+            generationConfig: {
+                responseModalities: ['TEXT', 'IMAGE'],
+                imageConfig: { aspectRatio, imageSize }
+            }
+        };
+
+        // --- Bug 3: Fire all generations in PARALLEL, fill slots as they complete ---
+        let anySuccess = false;
+
+        const generateOne = async (slotIndex) => {
+            const slot = targetSlots[slotIndex];
+            if (!slot || abortController.signal.aborted) return;
+
+            let lastError = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                if (abortController.signal.aborted) return;
+                try {
+                    const result = await callGenerateApi(modelConfig, requestBody, abortController);
+                    if (result) {
+                        // Load into Image object
+                        const img = await loadImageFromData(result.dataUrl);
+                        placeImageIntoFrame(engine, slot.frame, img, result.dataUrl, isReplaceMode && slotIndex === 0);
+                        anySuccess = true;
                         lastError = null;
                         break;
-                    } catch (e) {
-                        if (e.name === 'AbortError') throw e;
-                        lastError = e;
-                        console.warn('Image ' + (i + 1) + ' attempt ' + (attempt + 1) + ' failed:', e.message);
-                        if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
                     }
+                } catch (e) {
+                    if (e.name === 'AbortError') return;
+                    lastError = e;
+                    console.warn('Slot ' + slotIndex + ' attempt ' + (attempt + 1) + ' failed:', e.message);
+                    if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
                 }
-                if (lastError) console.error('Image ' + (i + 1) + ' failed after 3 attempts:', lastError.message);
             }
+
+            // Clear loading on this slot regardless
+            slot.frame._generating = false;
+            delete slot.frame._genStartTime;
+
+            if (lastError) {
+                console.error('Slot ' + slotIndex + ' failed after retries:', lastError.message);
+                // Remove empty new frame on failure
+                if (slot.isNew && !engine.elements.some(el => el.parentFrame === slot.frame && el.type === 'image')) {
+                    const idx = engine.elements.indexOf(slot.frame);
+                    if (idx !== -1) engine.elements.splice(idx, 1);
+                }
+            }
+            engine.render();
+        };
+
+        try {
+            // Launch all in parallel
+            await Promise.all(targetSlots.map((_, i) => generateOne(i)));
 
             if (abortController.signal.aborted) {
-                throw new DOMException('Generation stopped by user', 'AbortError');
+                showNotification('Generation stopped.');
+            } else if (!anySuccess) {
+                showNotification('No images were generated. Please try again.');
             }
-
-            if (successfulImages.length === 0) {
-                throw new Error('No images were generated. Please try again.');
-            }
-
-            // Place images
-            await placeGeneratedImages(successfulImages, genContext);
 
             // Clear input after success
-            editor.textContent = '';
-            genState.uploadedImages = [];
-            renderGenUploadedImages();
-            updateGenSendState();
-
+            if (anySuccess) {
+                els.editor.textContent = '';
+                state.uploadedImages = [];
+                renderUploadedImages(instance);
+            }
         } catch (error) {
-            if (error.name === 'AbortError') {
-                console.log('[canvas-gen] Generation stopped by user');
-                showGenNotification('Generation stopped.');
-            } else {
+            if (error.name !== 'AbortError') {
                 console.error('[canvas-gen] Generation failed:', error);
-                showGenNotification('Generation failed: ' + error.message);
+                showNotification('Generation failed: ' + error.message);
             }
         } finally {
-            genState.isGenerating = false;
-            genState.abortController = null;
-            // Return to collapsed state after generation
-            showGenPanel('collapsed');
-            updateGenSendState();
+            state.isGenerating = false;
+            state.abortController = null;
+            // Clear any remaining loading states
+            targetSlots.forEach(s => {
+                s.frame._generating = false;
+                delete s.frame._genStartTime;
+            });
+            showPanel(instance, 'collapsed');
+            updateSendState(instance);
+            if (engine) engine.render();
         }
     }
 
+    /**
+     * Create an empty frame and add to engine.
+     */
+    function createEmptyFrame(engine, x, y, width, height, fill) {
+        const frameCount = engine.elements.filter(el => el.type === 'frame').length + 1;
+        const frame = {
+            type: 'frame',
+            name: 'Frame ' + frameCount,
+            x, y, width, height,
+            fill: fill || '#FFFFFF',
+            stroke: '#E0E0E0',
+            strokeWidth: 1
+        };
+        engine.saveState();
+        engine.elements.push(frame);
+        return frame;
+    }
+
+    /**
+     * Place a loaded image into a frame.
+     * If isReplace=true, remove existing images in the frame first.
+     */
+    function placeImageIntoFrame(engine, frame, img, dataUrl, isReplace) {
+        if (isReplace) {
+            // Remove existing images in frame
+            const old = engine.elements.filter(el => el.parentFrame === frame && el.type === 'image');
+            old.forEach(child => {
+                const idx = engine.elements.indexOf(child);
+                if (idx !== -1) engine.elements.splice(idx, 1);
+            });
+        }
+
+        const imageElement = {
+            type: 'image',
+            x: frame.x,
+            y: frame.y,
+            width: frame.width,
+            height: frame.height,
+            image: img,
+            src: dataUrl,
+            parentFrame: frame
+        };
+        engine.elements.push(imageElement);
+
+        // Auto-name frame
+        autoNameFrame(frame, dataUrl);
+    }
+
+    function loadImageFromData(dataUrl) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error('Failed to load generated image'));
+            img.src = dataUrl;
+        });
+    }
+
     async function callGenerateApi(modelConfig, requestBody, abortController) {
-        // Send model in body — the server/Worker uses it to build the Gemini URL
         const payload = { ...requestBody, model: modelConfig.model };
 
         const fetchOptions = {
@@ -693,8 +1088,6 @@
 
         const data = await response.json();
 
-        // Extract image from Gemini generateContent response
-        // Format: { candidates: [{ content: { parts: [...] } }] }
         const candidates = data.candidates || [];
         for (const candidate of candidates) {
             const parts = candidate?.content?.parts || [];
@@ -710,139 +1103,8 @@
         return null;
     }
 
-    // ==================== Place Images into Frames ====================
-    async function placeGeneratedImages(imageDataArray, genContext) {
-        const engine = window.canvasEngine;
-        if (!engine) return;
-
-        const loadImage = (imgData) => {
-            return new Promise((resolve, reject) => {
-                const img = new Image();
-                img.onload = () => resolve(img);
-                img.onerror = () => reject(new Error('Failed to load generated image'));
-                img.src = imgData.dataUrl;
-            });
-        };
-
-        // Load all images
-        const loadedImages = [];
-        for (const imgData of imageDataArray) {
-            try {
-                const img = await loadImage(imgData);
-                loadedImages.push(img);
-            } catch (err) {
-                console.warn('[canvas-gen] Skipping failed image load:', err);
-            }
-        }
-
-        if (loadedImages.length === 0) return;
-
-        const { frame: sourceFrame, anchor, selectedElements } = genContext;
-
-        // Save state before modifications (for undo support)
-        engine.saveState();
-
-        const refRect = sourceFrame || anchor;
-        const FRAME_SPACING = 80;
-
-        // Determine if selected elements are inside a frame
-        const isInsideFrame = sourceFrame && selectedElements.some(el =>
-            el !== sourceFrame && el.type !== 'frame'
-        );
-
-        if (isInsideFrame) {
-            // CASE: Selected content inside a frame → replace selected elements
-            for (const sel of selectedElements) {
-                if (sel.type === 'frame') continue;
-                const idx = engine.elements.indexOf(sel);
-                if (idx !== -1) engine.elements.splice(idx, 1);
-            }
-
-            loadedImages.forEach((img, index) => {
-                if (index === 0) {
-                    // First image replaces into the source frame
-                    const imageElement = {
-                        type: 'image',
-                        x: sourceFrame.x,
-                        y: sourceFrame.y,
-                        width: sourceFrame.width,
-                        height: sourceFrame.height,
-                        image: img,
-                        src: img.src,
-                        parentFrame: sourceFrame
-                    };
-                    engine.elements.push(imageElement);
-                } else {
-                    const newFrameX = sourceFrame.x + (sourceFrame.width + FRAME_SPACING) * index;
-                    const newFrameY = sourceFrame.y;
-                    addFrameWithImage(engine, img, newFrameX, newFrameY,
-                        sourceFrame.width, sourceFrame.height, sourceFrame.fill);
-                }
-            });
-        } else if (sourceFrame) {
-            // CASE: Selected empty frame → place into frame
-            loadedImages.forEach((img, index) => {
-                if (index === 0) {
-                    const imageElement = {
-                        type: 'image',
-                        x: sourceFrame.x,
-                        y: sourceFrame.y,
-                        width: sourceFrame.width,
-                        height: sourceFrame.height,
-                        image: img,
-                        src: img.src,
-                        parentFrame: sourceFrame
-                    };
-                    engine.elements.push(imageElement);
-                } else {
-                    const newFrameX = sourceFrame.x + (sourceFrame.width + FRAME_SPACING) * index;
-                    const newFrameY = sourceFrame.y;
-                    addFrameWithImage(engine, img, newFrameX, newFrameY,
-                        sourceFrame.width, sourceFrame.height, sourceFrame.fill);
-                }
-            });
-        } else {
-            // CASE: No frame → create new frames to the right of selection
-            loadedImages.forEach((img, index) => {
-                const newFrameX = refRect.x + (refRect.width + FRAME_SPACING) * (index + 1);
-                const newFrameY = refRect.y;
-                addFrameWithImage(engine, img, newFrameX, newFrameY,
-                    refRect.width, refRect.height, '#FFFFFF');
-            });
-        }
-
-        // Re-render canvas
-        engine.render();
-    }
-
-    /**
-     * Helper: add a frame + image at a position.
-     * Frame is inserted BEFORE the image so the image renders on top.
-     */
-    function addFrameWithImage(engine, img, x, y, width, height, fill) {
-        const frameCount = engine.elements.filter(el => el.type === 'frame').length + 1;
-        const newFrame = {
-            type: 'frame',
-            name: 'Page ' + frameCount,
-            x, y, width, height,
-            fill: fill,
-            stroke: '#E0E0E0',
-            strokeWidth: 1
-        };
-        engine.elements.push(newFrame);
-
-        const imageElement = {
-            type: 'image',
-            x, y, width, height,
-            image: img,
-            src: img.src,
-            parentFrame: newFrame
-        };
-        engine.elements.push(imageElement);
-    }
-
     // ==================== Notifications ====================
-    function showGenNotification(message) {
+    function showNotification(message) {
         const existing = document.querySelector('.toast-notification');
         if (existing) existing.remove();
 
@@ -851,7 +1113,6 @@
         toast.style.cssText = 'position:fixed;top:80px;right:24px;background:#090C14;color:white;padding:12px 20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:10000;font-size:14px;font-weight:500;animation:slideIn 0.3s ease;max-width:400px;';
         toast.textContent = message;
 
-        // Add animation keyframes if not present
         if (!document.getElementById('gen-toast-styles')) {
             const style = document.createElement('style');
             style.id = 'gen-toast-styles';
@@ -863,6 +1124,129 @@
         setTimeout(() => {
             if (toast.parentNode) toast.remove();
         }, 5000);
+    }
+
+    // ==================== Initialization ====================
+    function initGenPanel() {
+        const engine = window.canvasEngine;
+        if (!engine) {
+            console.warn('[canvas-gen] Canvas engine not available');
+            return;
+        }
+
+        const template = document.getElementById('gen-panel-template');
+        if (!template) {
+            console.warn('[canvas-gen] gen-panel-template not found');
+            return;
+        }
+
+        // Chain into existing onSelectionChange (set by canvas.js for action bar)
+        const existingSelectionHandler = engine.onSelectionChange;
+        let _lastSelectionKey = null; // Track previous selection to avoid redundant updates
+
+        engine.onSelectionChange = (selectedElements) => {
+            // Call existing handler first (frame-action-bar logic)
+            if (existingSelectionHandler) existingSelectionHandler(selectedElements);
+
+            // Compute current key and skip if selection hasn't actually changed
+            const currentKey = selectedElements.length > 0 ? getPanelKey(selectedElements) : null;
+            if (currentKey === _lastSelectionKey) return;
+            _lastSelectionKey = currentKey;
+
+            // Hide all non-generating panels; generating panels stay visible
+            for (const [key, inst] of panelRegistry) {
+                if (!inst.state.isGenerating) {
+                    hidePanel(inst);
+                }
+            }
+
+            // Clean up stale panels (not generating, not currently selected)
+            for (const [key, inst] of panelRegistry) {
+                if (!inst.state.isGenerating && key !== currentKey) {
+                    removePanel(key);
+                }
+            }
+
+            if (selectedElements.length === 0) return;
+
+            const key = currentKey;
+            const instance = getOrCreatePanel(key);
+            if (!instance) return;
+
+            // If this panel is currently generating, don't override its thinking state
+            if (instance.state.isGenerating) {
+                return;
+            }
+
+            const frame = selectedElements.find(el => el.type === 'frame');
+            instance.state.selectedElements = [...selectedElements];
+
+            if (selectedElements.length === 1 && frame) {
+                // Selected a Frame
+                instance.state.currentFrame = frame;
+                instance.state.currentAnchor = frame;
+
+                // Check if frame is empty (no child elements)
+                const hasContent = engine.elements.some(el => el.parentFrame === frame);
+
+                if (!hasContent) {
+                    showPanel(instance, 'expanded');
+                    autoFocusEditor(instance);
+                } else {
+                    showPanel(instance, 'collapsed');
+                }
+            } else {
+                // Selected non-frame content → collapsed state
+                instance.state.currentFrame = findParentFrame(selectedElements);
+                instance.state.currentAnchor = getSelectionBounds(selectedElements);
+                collectSelectedAsReference(instance, selectedElements);
+                showPanel(instance, 'collapsed');
+            }
+        };
+
+        // Chain into render loop for position updates on ALL visible panels
+        const existingRender = engine.render.bind(engine);
+        engine.render = () => {
+            existingRender();
+            for (const [key, inst] of panelRegistry) {
+                if (inst.state.panelMode !== 'hidden') {
+                    // Recompute anchor from live element positions (for drag follow)
+                    if (inst.state.selectedElements && inst.state.selectedElements.length > 0 && !inst.state.isGenerating) {
+                        const frame = inst.state.selectedElements.find(el => el.type === 'frame');
+                        if (frame) {
+                            inst.state.currentAnchor = frame;
+                        } else {
+                            inst.state.currentAnchor = getSelectionBounds(inst.state.selectedElements);
+                        }
+                    }
+                    if (inst.state.currentAnchor) {
+                        updatePanelPosition(inst);
+                    }
+                }
+            }
+        };
+
+        console.log('[canvas-gen] Multi-instance generation panel initialized');
+    }
+
+    // ==================== Frame Loading Animation ====================
+    let _frameAnimRAF = null;
+    function startFrameLoadingAnimation() {
+        if (_frameAnimRAF) return; // already running
+        function tick() {
+            const engine = window.canvasEngine;
+            if (!engine) { _frameAnimRAF = null; return; }
+            // Check if any frame is still generating
+            const anyLoading = engine.elements.some(el => el._generating);
+            if (!anyLoading) {
+                _frameAnimRAF = null;
+                engine.render();
+                return;
+            }
+            engine.render();
+            _frameAnimRAF = requestAnimationFrame(tick);
+        }
+        _frameAnimRAF = requestAnimationFrame(tick);
     }
 
     // ==================== Bootstrap ====================

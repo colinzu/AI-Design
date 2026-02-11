@@ -97,7 +97,10 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
 
         try:
             req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            # Fix SSL error by using unverified context
+            import ssl
+            context = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=15, context=context) as resp:
                 data = resp.read()
                 self._send_proxy_response(resp.status, data, 'application/json')
         except urllib.error.HTTPError as e:

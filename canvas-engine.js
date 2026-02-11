@@ -48,6 +48,7 @@ class CanvasEngine {
 
         // Frame container state
         this.highlightedFrame = null; // Frame being hovered during drag
+        this.enteredFrame = null; // Frame the user has "entered" (double-click to enter)
 
         // Performance optimization
         this.renderScheduled = false;
@@ -105,7 +106,7 @@ class CanvasEngine {
     }
 
     zoom(delta, centerX, centerY) {
-        const zoomFactor = delta > 0 ? 1.1 : 0.9;
+        const zoomFactor = delta > 0 ? 1.04 : 0.96;
         let newScale = this.viewport.scale * zoomFactor;
         newScale = Math.max(this.viewport.minScale, Math.min(this.viewport.maxScale, newScale));
 
@@ -159,15 +160,25 @@ class CanvasEngine {
                 maxY = Math.max(maxY, el.y + el.height);
             });
 
-            const padding = 50;
+            // Padding: keep 20px from sidebars/toolbars
+            // Left sidebar ~68px + 20px, right 40px, top 60px + 20px, bottom toolbar ~68px + 20px
+            const padLeft = 88;
+            const padRight = 40;
+            const padTop = 80;
+            const padBottom = 88;
+            const availW = this.canvas.width - padLeft - padRight;
+            const availH = this.canvas.height - padTop - padBottom;
             const contentWidth = maxX - minX;
             const contentHeight = maxY - minY;
-            const scaleX = (this.canvas.width - padding * 2) / contentWidth;
-            const scaleY = (this.canvas.height - padding * 2) / contentHeight;
+            const scaleX = availW / contentWidth;
+            const scaleY = availH / contentHeight;
 
             this.viewport.scale = Math.min(scaleX, scaleY, this.viewport.maxScale);
-            this.viewport.x = (this.canvas.width - contentWidth * this.viewport.scale) / 2 - minX * this.viewport.scale;
-            this.viewport.y = (this.canvas.height - contentHeight * this.viewport.scale) / 2 - minY * this.viewport.scale;
+            // Center content within the available area
+            const centerX = padLeft + availW / 2;
+            const centerY = padTop + availH / 2;
+            this.viewport.x = centerX - (minX + contentWidth / 2) * this.viewport.scale;
+            this.viewport.y = centerY - (minY + contentHeight / 2) * this.viewport.scale;
         }
 
         this.render();
@@ -447,8 +458,63 @@ class CanvasEngine {
 
         document.addEventListener('keydown', (e) => this.handleKeyDown(e));
         document.addEventListener('keyup', (e) => this.handleKeyUp(e));
+        document.addEventListener('paste', (e) => this.handlePaste(e));
 
         this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    }
+
+    handlePaste(e) {
+        // Skip if typing in an input
+        if (this.editingText || this.isInputActive()) return;
+
+        const items = e.clipboardData?.items;
+        if (!items) return;
+
+        for (const item of items) {
+            if (item.type.startsWith('image/')) {
+                e.preventDefault();
+                const blob = item.getAsFile();
+                if (!blob) return;
+
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        this.saveState();
+
+                        const w = img.naturalWidth;
+                        const h = img.naturalHeight;
+                        const gap = 30;
+
+                        const pos = this.getNextGridPosition(w, h, gap);
+
+                        const element = {
+                            type: 'image',
+                            x: pos.x,
+                            y: pos.y,
+                            width: w,
+                            height: h,
+                            image: img,
+                            src: ev.target.result,
+                        };
+
+                        this.elements.push(element);
+                        this.selectedElements = [element];
+
+                        // Scroll viewport so the new image is centered on screen
+                        this.scrollToCenter(pos.x, pos.y, w, h);
+                        this.render();
+
+                        if (this.onSelectionChange) {
+                            this.onSelectionChange(this.selectedElements);
+                        }
+                    };
+                    img.src = ev.target.result;
+                };
+                reader.readAsDataURL(blob);
+                return; // Only handle first image
+            }
+        }
     }
 
     handleMouseDown(e) {
@@ -493,6 +559,16 @@ class CanvasEngine {
             const clickedElement = this.findElementAt(worldPos.x, worldPos.y);
 
             if (clickedElement) {
+                // If we click a frame that's different from the entered frame, exit entered mode
+                if (clickedElement.type === 'frame' && clickedElement !== this.enteredFrame) {
+                    this.enteredFrame = null;
+                }
+                // If we click outside the entered frame entirely, exit entered mode
+                if (this.enteredFrame && clickedElement !== this.enteredFrame &&
+                    clickedElement.parentFrame !== this.enteredFrame) {
+                    this.enteredFrame = null;
+                }
+
                 if (e.shiftKey) {
                     // Toggle selection logic
                     const index = this.selectedElements.indexOf(clickedElement);
@@ -520,6 +596,8 @@ class CanvasEngine {
                 this.saveState();
                 this.render();
             } else {
+                // Clicked on empty space — exit entered frame and deselect
+                this.enteredFrame = null;
                 if (!e.shiftKey) {
                     this.selectedElements = [];
                 }
@@ -803,15 +881,90 @@ class CanvasEngine {
         const y = e.clientY - rect.top;
         const worldPos = this.screenToWorld(x, y);
 
+        // Check if double-clicking on a frame header (for renaming)
+        for (let i = this.elements.length - 1; i >= 0; i--) {
+            const el = this.elements[i];
+            if (el.type === 'frame' && this.isOnFrameHeader(el, worldPos.x, worldPos.y)) {
+                this.startFrameRename(el, e.clientX, e.clientY);
+                return;
+            }
+        }
+
+        // Double-click on a selected frame → enter the frame to select children
+        if (this.selectedElements.length === 1 && this.selectedElements[0].type === 'frame') {
+            const frame = this.selectedElements[0];
+            if (worldPos.x >= frame.x && worldPos.x <= frame.x + frame.width &&
+                worldPos.y >= frame.y && worldPos.y <= frame.y + frame.height) {
+                this.enteredFrame = frame;
+                // Now find the child element at click position
+                const child = this.findElementAt(worldPos.x, worldPos.y);
+                if (child && child !== frame) {
+                    this.selectedElements = [child];
+                }
+                this.render();
+                return;
+            }
+        }
+
         const clickedElement = this.findElementAt(worldPos.x, worldPos.y);
         if (clickedElement && clickedElement.type === 'text') {
             this.startTextEditing(clickedElement);
         }
     }
 
+    startFrameRename(frame, screenX, screenY) {
+        // Create an overlay input at the frame name position
+        const fontSize = 12;
+        const gap = 8;
+        const nameScreenPos = this.worldToScreen(frame.x, frame.y);
+        const inputY = nameScreenPos.y - gap - fontSize - 2;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = frame.name || 'Frame';
+        input.className = 'frame-rename-input';
+        input.style.position = 'fixed';
+        input.style.left = (nameScreenPos.x) + 'px';
+        input.style.top = inputY + 'px';
+        input.style.fontSize = fontSize + 'px';
+        input.style.fontWeight = '600';
+        input.style.fontFamily = 'Inter, sans-serif';
+        input.style.color = '#0099B8';
+        input.style.background = 'rgba(255,255,255,0.95)';
+        input.style.border = '1px solid rgba(0,153,184,0.3)';
+        input.style.borderRadius = '4px';
+        input.style.padding = '1px 4px';
+        input.style.outline = 'none';
+        input.style.zIndex = '9999';
+        input.style.minWidth = '60px';
+        input.style.maxWidth = '200px';
+
+        document.body.appendChild(input);
+        input.focus();
+        input.select();
+
+        const commit = () => {
+            const newName = input.value.trim();
+            if (newName) {
+                frame.name = newName;
+            }
+            if (input.parentNode) input.parentNode.removeChild(input);
+            this.render();
+        };
+
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+            if (e.key === 'Escape') { input.value = frame.name || 'Frame'; input.blur(); }
+            e.stopPropagation();
+        });
+        input.addEventListener('mousedown', (e) => e.stopPropagation());
+        input.addEventListener('pointerdown', (e) => e.stopPropagation());
+    }
+
     handleKeyDown(e) {
-        // Space key for temporary Hand tool
-        if (e.code === 'Space' && !this.editingText && !e.repeat) {
+        // Space key for temporary Hand tool - but NOT in input fields
+        if (e.code === 'Space' && !this.editingText && !this.isInputActive() && !e.repeat) {
             e.preventDefault();
             this.spacePressed = true;
             if (!this.isPanning && !this.isDrawing) {
@@ -883,7 +1036,7 @@ class CanvasEngine {
                 'm': 'hand',        // M - Hand tool (previously H)
                 'h': 'hand',        // H - Hand tool (keep legacy)
                 't': 'text',        // T - Text tool
-                'r': 'shape',       // R - Rectangle/Shape tool
+                'r': 'rectangle',   // R - Rectangle/Shape tool
                 'p': 'pencil',      // P - Pencil tool
                 'f': 'frame',       // F - Frame tool (renamed from Page)
                 'i': 'image'        // I - Image tool
@@ -893,7 +1046,7 @@ class CanvasEngine {
                 e.preventDefault();
                 this.setTool(shortcuts[key]);
 
-                // For shape tool, default to rectangle
+                // For rectangle tool, ensure rectangle shape is selected
                 if (key === 'r') {
                     this.setShapeType('rectangle');
                 }
@@ -987,78 +1140,101 @@ class CanvasEngine {
         return this.screenToWorld(centerX, centerY);
     }
 
-    // Find empty space on canvas to place new element without overlapping
-    findEmptySpace(width, height, preferredX = null, preferredY = null) {
-        // Start from preferred position (viewport center) or specified position
-        const startPos = preferredX !== null && preferredY !== null
-            ? { x: preferredX, y: preferredY }
-            : this.getViewportCenter();
+    /**
+     * Get the best position for a new element.
+     * Priority:
+     *   1. Viewport center — if no overlap, place there directly.
+     *   2. To the right of whatever occupies the center (same row).
+     *   3. Wrap to next row after 8 items per row, 30px gap.
+     */
+    getNextGridPosition(itemWidth, itemHeight, gap = 30, cols = 8) {
+        const topLevel = this.elements.filter(el => !el.parentFrame);
 
-        const offset = 50; // Offset distance when collision detected
-        let x = startPos.x - width / 2;
-        let y = startPos.y - height / 2;
-
-        // Check if position overlaps with existing elements
-        const checkOverlap = (testX, testY) => {
-            return this.elements.some(el => {
-                // Simple bounding box collision detection
-                return !(testX + width < el.x ||
-                    testX > el.x + el.width ||
-                    testY + height < el.y ||
-                    testY > el.y + el.height);
-            });
-        };
-
-        // If no overlap at preferred position, use it
-        if (!checkOverlap(x, y)) {
-            return { x, y };
+        if (topLevel.length === 0) {
+            // Empty canvas: place at viewport center
+            const center = this.getViewportCenter();
+            return { x: center.x - itemWidth / 2, y: center.y - itemHeight / 2 };
         }
 
-        // Try spiral pattern to find empty space
-        const maxAttempts = 20;
-        let attempt = 0;
-        let spiralOffset = offset;
+        // Check if viewport center is free
+        const center = this.getViewportCenter();
+        const cx = center.x - itemWidth / 2;
+        const cy = center.y - itemHeight / 2;
+        const overlaps = topLevel.some(el =>
+            el.x < cx + itemWidth + gap && el.x + el.width > cx - gap &&
+            el.y < cy + itemHeight + gap && el.y + el.height > cy - gap
+        );
 
-        while (attempt < maxAttempts) {
-            // Try positions in a spiral pattern around the center
-            const positions = [
-                { x: x + spiralOffset, y: y },              // Right
-                { x: x, y: y + spiralOffset },              // Down
-                { x: x - spiralOffset, y: y },              // Left
-                { x: x, y: y - spiralOffset },              // Up
-                { x: x + spiralOffset, y: y + spiralOffset }, // Bottom-right
-                { x: x - spiralOffset, y: y + spiralOffset }, // Bottom-left
-                { x: x - spiralOffset, y: y - spiralOffset }, // Top-left
-                { x: x + spiralOffset, y: y - spiralOffset }  // Top-right
-            ];
+        if (!overlaps) {
+            return { x: cx, y: cy };
+        }
 
-            for (const pos of positions) {
-                if (!checkOverlap(pos.x, pos.y)) {
-                    return pos;
-                }
+        // Center is occupied — place to the right of existing content.
+        // Sort elements: top-to-bottom then left-to-right
+        const sorted = [...topLevel].sort((a, b) => {
+            const rowDiff = a.y - b.y;
+            if (Math.abs(rowDiff) > gap) return rowDiff;
+            return a.x - b.x;
+        });
+
+        const originX = sorted[0].x;
+
+        // Group into rows by y-proximity
+        const rows = [];
+        let currentRow = [sorted[0]];
+        for (let i = 1; i < sorted.length; i++) {
+            const el = sorted[i];
+            if (Math.abs(el.y - currentRow[0].y) < gap) {
+                currentRow.push(el);
+            } else {
+                rows.push(currentRow);
+                currentRow = [el];
             }
-
-            spiralOffset += offset;
-            attempt++;
         }
+        rows.push(currentRow);
 
-        // If all attempts fail, return position with offset (will overlap but at least shifted)
-        return { x: x + offset * attempt, y: y + offset * attempt };
+        const lastRow = rows[rows.length - 1];
+        if (lastRow.length < cols) {
+            // Room in the last row
+            const lastEl = lastRow[lastRow.length - 1];
+            return {
+                x: lastEl.x + lastEl.width + gap,
+                y: lastRow[0].y
+            };
+        } else {
+            // Row full — start a new row below
+            let maxBottom = -Infinity;
+            topLevel.forEach(el => {
+                maxBottom = Math.max(maxBottom, el.y + el.height);
+            });
+            return { x: originX, y: maxBottom + gap };
+        }
+    }
+
+    /**
+     * Scroll the viewport so that a world-space rectangle is centered on screen.
+     */
+    scrollToCenter(worldX, worldY, width, height) {
+        const screenCenterX = this.canvas.width / 2;
+        const screenCenterY = this.canvas.height / 2;
+        const worldCenterX = worldX + width / 2;
+        const worldCenterY = worldY + height / 2;
+
+        this.viewport.x = screenCenterX - worldCenterX * this.viewport.scale;
+        this.viewport.y = screenCenterY - worldCenterY * this.viewport.scale;
     }
 
     addFrame(worldX, worldY) {
-        // Create 1:1 ratio frame (square) with default size 1080x1080
         const frameSize = 1080;
+        const gap = 30;
 
-        // Find empty space instead of stacking at center
-        const pos = this.findEmptySpace(frameSize, frameSize, worldX, worldY);
+        const pos = this.getNextGridPosition(frameSize, frameSize, gap);
 
-        // Count existing frames for naming
         const frameCount = this.elements.filter(el => el.type === 'frame').length + 1;
 
         const frame = {
             type: 'frame',
-            name: `Page ${frameCount}`,
+            name: `Frame ${frameCount}`,
             x: pos.x,
             y: pos.y,
             width: frameSize,
@@ -1068,12 +1244,12 @@ class CanvasEngine {
             strokeWidth: 1
         };
 
-        // Save state BEFORE adding frame
         this.saveState();
         this.elements.push(frame);
-
-        // Auto-select the new frame (Figma-like behavior)
         this.selectedElements = [frame];
+
+        // Scroll viewport so the new frame is centered on screen
+        this.scrollToCenter(pos.x, pos.y, frameSize, frameSize);
         this.render();
     }
 
@@ -1469,8 +1645,8 @@ class CanvasEngine {
             const files = Array.from(e.target.files);
             if (files.length === 0) return;
 
-            const imagesPerRow = 5;
-            const spacing = 40;
+            const imagesPerRow = 8;
+            const spacing = 30;
             let loadedCount = 0;
             const imageElements = [];
 
@@ -1494,6 +1670,16 @@ class CanvasEngine {
                             // Save state BEFORE adding images
                             this.saveState();
                             this.arrangeImagesInGrid(imageElements, worldX, worldY, imagesPerRow, spacing);
+
+                            // Scroll viewport to the last placed image
+                            const lastImg = imageElements[imageElements.length - 1];
+                            if (lastImg) {
+                                const placed = this.elements.find(el =>
+                                    el.type === 'image' && el.image === lastImg.image);
+                                if (placed) {
+                                    this.scrollToCenter(placed.x, placed.y, placed.width, placed.height);
+                                }
+                            }
                             this.render();
                         }
                     };
@@ -1506,18 +1692,15 @@ class CanvasEngine {
     }
 
     arrangeImagesInGrid(imageElements, startX, startY, imagesPerRow, spacing) {
-        // Calculate total grid dimensions to find empty space
-        const gridWidth = imageElements.slice(0, imagesPerRow).reduce((sum, img, idx) =>
-            sum + img.width + (idx > 0 ? spacing : 0), 0);
-        const totalRows = Math.ceil(imageElements.length / imagesPerRow);
-        const avgHeight = imageElements.reduce((sum, img) => sum + img.height, 0) / imageElements.length;
-        const gridHeight = totalRows * avgHeight + (totalRows - 1) * spacing;
+        // Use grid position for the first image
+        const firstPos = this.getNextGridPosition(
+            imageElements[0]?.width || 500,
+            imageElements[0]?.height || 500,
+            spacing, imagesPerRow
+        );
 
-        // Find empty space for the entire grid
-        const gridPos = this.findEmptySpace(gridWidth, gridHeight, startX, startY);
-
-        let currentX = gridPos.x;
-        let currentY = gridPos.y;
+        let currentX = firstPos.x;
+        let currentY = firstPos.y;
         let maxHeightInRow = 0;
         const newElements = [];
 
@@ -1541,7 +1724,7 @@ class CanvasEngine {
             // Move to next position
             if ((index + 1) % imagesPerRow === 0) {
                 // Start new row
-                currentX = gridPos.x;
+                currentX = firstPos.x;
                 currentY += maxHeightInRow + spacing;
                 maxHeightInRow = 0;
             } else {
@@ -1647,10 +1830,14 @@ class CanvasEngine {
             }
         }
 
-        // Second pass: check non-frame elements (children should be found before their parent frame)
+        // Second pass: check non-frame elements
+        // Only search children of the "entered" frame, or non-parented elements
         for (let i = this.elements.length - 1; i >= 0; i--) {
             const el = this.elements[i];
-            if (el.type === 'frame') continue; // Skip frames in this pass
+            if (el.type === 'frame') continue;
+
+            // If element is inside a frame, only allow selection if that frame is "entered"
+            if (el.parentFrame && el.parentFrame !== this.enteredFrame) continue;
 
             if (el.type === 'shape' && el.shapeType === 'line') {
                 const threshold = 5 / this.viewport.scale;
@@ -1671,7 +1858,7 @@ class CanvasEngine {
             }
         }
 
-        // Third pass: check frames (body area) — lowest priority so children are found first
+        // Third pass: check frames (body area)
         for (let i = this.elements.length - 1; i >= 0; i--) {
             const el = this.elements[i];
             if (el.type !== 'frame') continue;
@@ -2002,53 +2189,88 @@ class CanvasEngine {
                 this.ctx.lineWidth = el.strokeWidth;
                 this.ctx.strokeRect(el.x, el.y, el.width, el.height);
 
-                // Draw Frame Headers (Icon + Name, Dimensions)
-                // Draw Frame Headers (Icon + Name, Dimensions)
-                const headerY = Math.round(el.y - 12);
-                const isSelected = this.selectedElements.indexOf(el) !== -1;
-                const nameColor = isSelected ? '#0099B8' : '#333333';
+                // Draw Frame Headers (Name + Dimensions) — hidden below 10% zoom
+                // Rendered in screen-space for pixel-crisp text at any zoom level
+                if (this.viewport.scale >= 0.10) {
+                    const isSelected = this.selectedElements.indexOf(el) !== -1;
+                    const nameColor = isSelected ? '#0099B8' : '#888888';
+                    const dimColor = '#bbbbbb'; // Very light grey, never changes on selection
 
-                // Use a smaller, fixed font size in Screen Space scaling
-                // Reduced from 14 to 11 per user request ("too big")
-                const fontSize = 11 / this.viewport.scale;
+                    const screenFontSize = 12; // Fixed 12px on screen
+                    const screenGap = 8; // Fixed 8px gap above frame on screen
 
-                // 1. Icon + Name (Left)
-                this.ctx.textAlign = 'left';
-                this.ctx.textBaseline = 'bottom';
+                    // Convert frame corners to screen coords
+                    const leftScreen = this.worldToScreen(el.x, el.y);
+                    const rightScreen = this.worldToScreen(el.x + el.width, el.y);
 
-                // Draw Icon (Simple Layout Icon - Rectangle with sidebar)
-                const iconSize = fontSize;
-                const iconX = Math.round(el.x);
-                const iconY = Math.round(headerY - 2 / this.viewport.scale);
+                    // Reset transform to identity (canvas has no DPR scaling)
+                    this.ctx.save();
+                    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-                this.ctx.strokeStyle = nameColor;
-                this.ctx.lineWidth = 1.5 / this.viewport.scale;
+                    const textY = leftScreen.y - screenGap;
 
-                // Main box
-                this.ctx.strokeRect(iconX, iconY - iconSize + 2 / this.viewport.scale, iconSize - 3 / this.viewport.scale, iconSize - 3 / this.viewport.scale);
+                    // 1. Name (Left) — light weight for clarity
+                    this.ctx.textAlign = 'left';
+                    this.ctx.textBaseline = 'bottom';
+                    this.ctx.fillStyle = nameColor;
+                    this.ctx.font = `300 ${screenFontSize}px Inter, system-ui, sans-serif`;
+                    this.ctx.fillText(el.name || 'Frame', Math.round(leftScreen.x), Math.round(textY));
 
-                // Sidebar line
-                this.ctx.beginPath();
-                this.ctx.moveTo(iconX + ((iconSize - 3 / this.viewport.scale) * 0.35), iconY - iconSize + 2 / this.viewport.scale);
-                this.ctx.lineTo(iconX + ((iconSize - 3 / this.viewport.scale) * 0.35), iconY - 1 / this.viewport.scale);
-                this.ctx.stroke();
+                    // 2. Dimensions (Right) — thin weight, very light
+                    this.ctx.textAlign = 'right';
+                    this.ctx.fillStyle = dimColor;
+                    this.ctx.font = `300 ${screenFontSize}px Inter, system-ui, sans-serif`;
+                    const dimText = `${Math.round(el.width)} × ${Math.round(el.height)}`;
+                    this.ctx.fillText(dimText, Math.round(rightScreen.x), Math.round(textY));
 
-                // Name
-                this.ctx.fillStyle = nameColor;
-                this.ctx.font = `600 ${fontSize}px Inter, sans-serif`;
-                this.ctx.fillText(el.name || 'Frame', Math.round(el.x + iconSize + 2 / this.viewport.scale), headerY);
+                    this.ctx.restore();
+                }
 
-                // 2. Dimensions (Right)
-                this.ctx.textAlign = 'right';
-                const dimText = `${Math.round(el.width)} × ${Math.round(el.height)}`;
+                // ===== Loading overlay when generating =====
+                if (el._generating) {
+                    const t = ((performance.now() - (el._genStartTime || 0)) / 1000);
+                    this.ctx.save();
+                    this.ctx.beginPath();
+                    this.ctx.rect(el.x, el.y, el.width, el.height);
+                    this.ctx.clip();
 
-                const rightEdge = el.x + el.width;
+                    // Semi-transparent dark overlay
+                    this.ctx.fillStyle = 'rgba(7, 50, 71, 0.06)';
+                    this.ctx.fillRect(el.x, el.y, el.width, el.height);
 
-                // Dimensions
-                this.ctx.fillStyle = '#888888'; // Grey for dimensions
-                this.ctx.font = `500 ${fontSize}px Inter, sans-serif`; // Medium weight
-                this.ctx.fillText(dimText, rightEdge, headerY);
-                break;
+                    // Subtle shimmer: a sweeping gradient band
+                    const shimmerW = el.width * 0.6;
+                    const cycle = 2.0; // seconds per sweep
+                    const progress = (t % cycle) / cycle;
+                    const shimmerX = el.x - shimmerW + (el.width + shimmerW * 2) * progress;
+
+                    const grad = this.ctx.createLinearGradient(shimmerX, el.y, shimmerX + shimmerW, el.y);
+                    grad.addColorStop(0, 'rgba(255, 255, 255, 0)');
+                    grad.addColorStop(0.3, 'rgba(0, 200, 210, 0.08)');
+                    grad.addColorStop(0.5, 'rgba(0, 200, 210, 0.12)');
+                    grad.addColorStop(0.7, 'rgba(0, 200, 210, 0.08)');
+                    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                    this.ctx.fillStyle = grad;
+                    this.ctx.fillRect(el.x, el.y, el.width, el.height);
+
+                    // Subtle pulsing dots in center
+                    const cx = el.x + el.width / 2;
+                    const cy = el.y + el.height / 2;
+                    const dotCount = 3;
+                    const dotSpacing = 16 / this.viewport.scale;
+                    const dotRadius = 3 / this.viewport.scale;
+                    for (let i = 0; i < dotCount; i++) {
+                        const dx = cx + (i - 1) * dotSpacing;
+                        const phase = t * 3 + i * 0.6;
+                        const alpha = 0.15 + 0.2 * Math.sin(phase);
+                        this.ctx.beginPath();
+                        this.ctx.arc(dx, cy, dotRadius, 0, Math.PI * 2);
+                        this.ctx.fillStyle = `rgba(0, 200, 210, ${alpha})`;
+                        this.ctx.fill();
+                    }
+
+                    this.ctx.restore();
+                }
                 break;
 
             case 'image':
@@ -2388,9 +2610,9 @@ class CanvasEngine {
     isOnFrameHeader(frame, worldX, worldY) {
         const headerHeight = 20 / this.viewport.scale;
         return worldX >= frame.x &&
-               worldX <= frame.x + frame.width &&
-               worldY >= frame.y - headerHeight &&
-               worldY < frame.y;
+            worldX <= frame.x + frame.width &&
+            worldY >= frame.y - headerHeight &&
+            worldY < frame.y;
     }
 
     // Calculate bounding box for path
