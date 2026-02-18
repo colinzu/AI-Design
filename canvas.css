@@ -43,16 +43,22 @@ body.canvas-mode {
 /* ==================== Top Bar (Embedded in Canvas) ==================== */
 .top-bar {
     position: fixed;
-    top: 12px;
-    left: 12px;
-    height: auto;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 48px;           /* exactly match index.html header height */
     background: transparent;
     display: flex;
     align-items: center;
-    padding: 0;
+    padding: 0 0 0 20px;    /* same left padding as index.html */
     gap: 8px;
     z-index: 100;
-    max-width: 320px;
+    pointer-events: none;   /* let canvas clicks through the gap */
+}
+
+/* Re-enable pointer events for every direct interactive child */
+.top-bar .left-section {
+    pointer-events: auto;
 }
 
 .left-section {
@@ -118,12 +124,13 @@ body.canvas-mode {
 /* Top Right Controls (Embedded in Canvas) */
 .header-right {
     position: fixed;
-    top: 12px;
-    right: 12px;
+    top: 0;
+    right: 0;
+    height: 48px;           /* exactly match index.html header height */
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 0;
+    padding: 0 20px 0 0;    /* same right padding as index.html */
     background: transparent;
     z-index: 100;
 }
@@ -138,7 +145,7 @@ body.canvas-mode {
     gap: 4px;
 
     /* Position */
-    position: absolute;
+    position: fixed;
     width: 48px;
     height: 212px;
     left: 12px;
@@ -150,7 +157,7 @@ body.canvas-mode {
     border-radius: 28px;
     border: 1px solid rgba(7, 50, 71, 0.08);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-    z-index: 50;
+    z-index: 1100;
 }
 
 .sidebar-btn {
@@ -242,7 +249,7 @@ body.canvas-mode {
     border-radius: 24px;
     border: 1px solid rgba(7, 50, 71, 0.08);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
-    z-index: 50;
+    z-index: 1100;
     width: auto;
     height: 48px;
 }
@@ -500,6 +507,74 @@ body.canvas-mode {
     height: 1px;
     background: rgba(0, 0, 0, 0.06);
     margin: 6px 8px;
+}
+
+/* Recent Projects flyout submenu */
+.menu-item.has-submenu {
+    position: relative;
+    cursor: default;
+}
+
+.recent-projects-submenu {
+    display: none;
+    position: absolute;
+    left: 100%;
+    top: -8px;
+    margin-left: 4px;
+    background: #FFFFFF;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+    padding: 8px;
+    min-width: 220px;
+    z-index: 1100;
+}
+
+.recent-projects-submenu.open {
+    display: block;
+}
+
+.recent-submenu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.recent-submenu-item:hover {
+    background: rgba(7, 50, 71, 0.06);
+}
+
+.recent-submenu-thumb {
+    width: 40px;
+    height: 28px;
+    border-radius: 4px;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: #EAEFF5;
+}
+
+.recent-submenu-thumb-empty {
+    background: linear-gradient(135deg, #EAEFF5 0%, #dde4ed 100%);
+}
+
+.recent-submenu-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: #073247;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.recent-submenu-empty {
+    padding: 10px 12px;
+    font-size: 13px;
+    color: #999;
 }
 
 /* ==================== Right Sidebar (Agent) ==================== */

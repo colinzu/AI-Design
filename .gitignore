@@ -8,3 +8,4 @@ server.log
 server.pid
 .wrangler/
 .env
+auth.local.js

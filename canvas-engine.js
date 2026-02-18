@@ -67,17 +67,23 @@ class CanvasEngine {
         window.addEventListener('resize', () => this.resizeCanvas());
         this.setupEventListeners();
 
-        // Center viewport
-        this.viewport.x = this.canvas.width / 2;
-        this.viewport.y = this.canvas.height / 2;
+        // Center viewport (use CSS pixel dimensions)
+        this.viewport.x = this.cssWidth / 2;
+        this.viewport.y = this.cssHeight / 2;
 
         this.render();
         this.updateZoomDisplay();
     }
 
     resizeCanvas() {
-        this.canvas.width = window.innerWidth;
-        this.canvas.height = window.innerHeight;
+        const dpr = window.devicePixelRatio || 1;
+        this.dpr = dpr;
+        this.cssWidth = window.innerWidth;
+        this.cssHeight = window.innerHeight;
+        this.canvas.width = Math.round(this.cssWidth * dpr);
+        this.canvas.height = Math.round(this.cssHeight * dpr);
+        this.canvas.style.width = this.cssWidth + 'px';
+        this.canvas.style.height = this.cssHeight + 'px';
         this.render();
     }
 
@@ -125,8 +131,8 @@ class CanvasEngine {
     }
 
     setZoom(scale) {
-        const centerX = this.canvas.width / 2;
-        const centerY = this.canvas.height / 2;
+        const centerX = this.cssWidth / 2;
+        const centerY = this.cssHeight / 2;
         const worldPos = this.screenToWorld(centerX, centerY);
 
         this.viewport.scale = Math.max(this.viewport.minScale, Math.min(this.viewport.maxScale, scale));
@@ -148,8 +154,8 @@ class CanvasEngine {
 
     fitToScreen() {
         if (this.elements.length === 0) {
-            this.viewport.x = this.canvas.width / 2;
-            this.viewport.y = this.canvas.height / 2;
+            this.viewport.x = this.cssWidth / 2;
+            this.viewport.y = this.cssHeight / 2;
             this.viewport.scale = 0.2;
         } else {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -166,8 +172,8 @@ class CanvasEngine {
             const padRight = 40;
             const padTop = 80;
             const padBottom = 88;
-            const availW = this.canvas.width - padLeft - padRight;
-            const availH = this.canvas.height - padTop - padBottom;
+            const availW = this.cssWidth - padLeft - padRight;
+            const availH = this.cssHeight - padTop - padBottom;
             const contentWidth = maxX - minX;
             const contentHeight = maxY - minY;
             const scaleX = availW / contentWidth;
@@ -550,6 +556,18 @@ class CanvasEngine {
                     y: element.y,
                     fontSize: element.fontSize || 16
                 };
+
+                // For frames: snapshot all children so corner resize can scale them
+                if (element.type === 'frame') {
+                    this.resizeStartState.children = this.getFrameChildren(element).map(child => ({
+                        el: child,
+                        x: child.x,
+                        y: child.y,
+                        width: child.width,
+                        height: child.height,
+                        fontSize: child.fontSize || null,
+                    }));
+                }
 
                 // Don't save state here - will save after resize completes
                 return;
@@ -1215,8 +1233,8 @@ class CanvasEngine {
      * Scroll the viewport so that a world-space rectangle is centered on screen.
      */
     scrollToCenter(worldX, worldY, width, height) {
-        const screenCenterX = this.canvas.width / 2;
-        const screenCenterY = this.canvas.height / 2;
+        const screenCenterX = this.cssWidth / 2;
+        const screenCenterY = this.cssHeight / 2;
         const worldCenterX = worldX + width / 2;
         const worldCenterY = worldY + height / 2;
 
@@ -1449,64 +1467,67 @@ class CanvasEngine {
                 element.y = snapped.y;
             }
         } else {
-            // Standard bounding box resize with snap
             const originalWidth = element.width;
             const originalHeight = element.height;
             const originalX = element.x;
             const originalY = element.y;
-            const aspectRatio = element.width / element.height;
 
-            // Calculate new dimensions first (without snap)
             let newX = originalX;
             let newY = originalY;
             let newWidth = originalWidth;
             let newHeight = originalHeight;
 
-            switch (handle) {
-                case 'nw':
-                    newWidth = originalX + originalWidth - worldX;
-                    newHeight = originalY + originalHeight - worldY;
-                    newX = worldX;
-                    newY = worldY;
-                    break;
-                case 'ne':
-                    newWidth = worldX - originalX;
-                    newHeight = originalY + originalHeight - worldY;
-                    newY = worldY;
-                    break;
-                case 'sw':
-                    newWidth = originalX + originalWidth - worldX;
-                    newHeight = worldY - originalY;
-                    newX = worldX;
-                    break;
-                case 'se':
-                    newWidth = worldX - originalX;
-                    newHeight = worldY - originalY;
-                    break;
-                case 'n':
-                    newHeight = originalY + originalHeight - worldY;
-                    newY = worldY;
-                    break;
-                case 's':
-                    newHeight = worldY - originalY;
-                    break;
-                case 'w':
-                    newWidth = originalX + originalWidth - worldX;
-                    newX = worldX;
-                    break;
-                case 'e':
-                    newWidth = worldX - originalX;
-                    break;
-            }
+            if (handle.length === 2 && this.resizeStartState) {
+                // Corner handles: ALWAYS proportional, anchored to resize-start state
+                const startX = this.resizeStartState.x;
+                const startY = this.resizeStartState.y;
+                const startW = this.resizeStartState.width;
+                const startH = this.resizeStartState.height;
+                const startAR = startW / startH;
 
-            // Maintain aspect ratio with Shift
-            if (shiftKey && handle.length === 2) { // Corner handles only
-                newHeight = newWidth / aspectRatio;
-                if (handle.includes('n')) {
-                    newY = originalY + originalHeight - newHeight;
+                switch (handle) {
+                    case 'se':
+                        newWidth  = worldX - startX;
+                        newHeight = newWidth / startAR;
+                        newX = startX;
+                        newY = startY;
+                        break;
+                    case 'sw':
+                        newWidth  = (startX + startW) - worldX;
+                        newHeight = newWidth / startAR;
+                        newX = worldX;
+                        newY = startY;
+                        break;
+                    case 'ne':
+                        newWidth  = worldX - startX;
+                        newHeight = newWidth / startAR;
+                        newX = startX;
+                        newY = (startY + startH) - newHeight;
+                        break;
+                    case 'nw':
+                        newWidth  = (startX + startW) - worldX;
+                        newHeight = newWidth / startAR;
+                        newX = worldX;
+                        newY = (startY + startH) - newHeight;
+                        break;
                 }
-                if (handle.includes('w')) {
-                    newX = originalX + originalWidth - newWidth;
+            } else {
+                // Edge handles: free single-axis resize (incremental)
+                switch (handle) {
+                    case 'n':
+                        newHeight = originalY + originalHeight - worldY;
+                        newY = worldY;
+                        break;
+                    case 's':
+                        newHeight = worldY - originalY;
+                        break;
+                    case 'w':
+                        newWidth = originalX + originalWidth - worldX;
+                        newX = worldX;
+                        break;
+                    case 'e':
+                        newWidth = worldX - originalX;
+                        break;
                 }
             }
 
@@ -1567,13 +1588,29 @@ class CanvasEngine {
 
             // Auto-scale text font size based on height for text elements
             if (element.type === 'text' && this.resizeStartState) {
-                // Scale font size proportionally to height change relative to START of resize
-                // This ensures smooth scaling without compounding errors
                 const heightRatio = element.height / this.resizeStartState.height;
                 element.fontSize = Math.max(8, Math.round(this.resizeStartState.fontSize * heightRatio));
-
-                // Refit dimensions to text content (Point Text behavior)
                 this.fitTextElement(element);
+            }
+
+            // Corner handle on a frame: scale all children proportionally
+            if (element.type === 'frame' && handle.length === 2 &&
+                this.resizeStartState && this.resizeStartState.children) {
+                const startW = this.resizeStartState.width;
+                const startH = this.resizeStartState.height;
+                const startX = this.resizeStartState.x;
+                const startY = this.resizeStartState.y;
+                const scaleX = element.width / startW;
+                const scaleY = element.height / startH;
+                this.resizeStartState.children.forEach(cs => {
+                    cs.el.x = element.x + (cs.x - startX) * scaleX;
+                    cs.el.y = element.y + (cs.y - startY) * scaleY;
+                    cs.el.width = Math.max(1, cs.width * scaleX);
+                    cs.el.height = Math.max(1, cs.height * scaleY);
+                    if (cs.fontSize !== null) {
+                        cs.el.fontSize = Math.max(8, Math.round(cs.fontSize * scaleY));
+                    }
+                });
             }
         }
 
@@ -1584,38 +1621,33 @@ class CanvasEngine {
         if (this.selectedElements.length !== 1) return null;
 
         const element = this.selectedElements[0];
-        const handleRadius = 3 / this.viewport.scale; // Match the circle radius
-        const hitArea = 6 / this.viewport.scale; // Slightly larger hit area for easier clicking
+        // Corner handles: larger hit area (10 screen px)
+        const cornerHit = 10 / this.viewport.scale;
+        // Edge handles: respond along the FULL edge length (8 screen px wide zone)
+        const edgeHit = 8 / this.viewport.scale;
 
         if (element.type === 'shape' && element.shapeType === 'line') {
-            // Line/arrow has endpoints only
-            if (Math.abs(worldX - element.x) < hitArea && Math.abs(worldY - element.y) < hitArea) {
-                return 'nw';
-            }
-            if (Math.abs(worldX - element.x2) < hitArea && Math.abs(worldY - element.y2) < hitArea) {
-                return 'se';
-            }
-        } else {
-            // Check all 8 handles (4 corners + 4 edges) but only 4 corners are visible
-            const handles = [
-                // Corner handles (visible)
-                { name: 'nw', x: element.x, y: element.y },
-                { name: 'ne', x: element.x + element.width, y: element.y },
-                { name: 'se', x: element.x + element.width, y: element.y + element.height },
-                { name: 'sw', x: element.x, y: element.y + element.height },
-                // Edge handles (invisible but functional)
-                { name: 'n', x: element.x + element.width / 2, y: element.y },
-                { name: 'e', x: element.x + element.width, y: element.y + element.height / 2 },
-                { name: 's', x: element.x + element.width / 2, y: element.y + element.height },
-                { name: 'w', x: element.x, y: element.y + element.height / 2 }
-            ];
-
-            for (const handle of handles) {
-                if (Math.abs(worldX - handle.x) < hitArea && Math.abs(worldY - handle.y) < hitArea) {
-                    return handle.name;
-                }
-            }
+            if (Math.abs(worldX - element.x) < cornerHit && Math.abs(worldY - element.y) < cornerHit) return 'nw';
+            if (Math.abs(worldX - element.x2) < cornerHit && Math.abs(worldY - element.y2) < cornerHit) return 'se';
+            return null;
         }
+
+        const { x, y, width, height } = element;
+
+        // Corners first — highest priority
+        if (Math.abs(worldX - x) < cornerHit && Math.abs(worldY - y) < cornerHit) return 'nw';
+        if (Math.abs(worldX - (x + width)) < cornerHit && Math.abs(worldY - y) < cornerHit) return 'ne';
+        if (Math.abs(worldX - (x + width)) < cornerHit && Math.abs(worldY - (y + height)) < cornerHit) return 'se';
+        if (Math.abs(worldX - x) < cornerHit && Math.abs(worldY - (y + height)) < cornerHit) return 'sw';
+
+        // Edges: trigger anywhere along the full edge (excluding the corner zones)
+        const inXRange = worldX >= x + cornerHit && worldX <= x + width - cornerHit;
+        const inYRange = worldY >= y + cornerHit && worldY <= y + height - cornerHit;
+
+        if (inXRange && Math.abs(worldY - y) < edgeHit) return 'n';            // top edge
+        if (inXRange && Math.abs(worldY - (y + height)) < edgeHit) return 's'; // bottom edge
+        if (inYRange && Math.abs(worldX - x) < edgeHit) return 'w';            // left edge
+        if (inYRange && Math.abs(worldX - (x + width)) < edgeHit) return 'e'; // right edge
 
         return null;
     }
@@ -1914,9 +1946,15 @@ class CanvasEngine {
     }
 
     render() {
-        // Clear canvas
+        const dpr = this.dpr || 1;
+
+        // Apply DPR scale so all drawing commands use CSS pixel units
+        this.ctx.save();
+        this.ctx.scale(dpr, dpr);
+
+        // Clear canvas (in CSS pixels)
         this.ctx.fillStyle = '#EAEFF5';
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.fillRect(0, 0, this.cssWidth || this.canvas.width, this.cssHeight || this.canvas.height);
 
         // Draw background grid
         this.drawGrid();
@@ -1966,6 +2004,11 @@ class CanvasEngine {
                     }
                 });
                 this.ctx.restore();
+            }
+
+            // Loading overlay AFTER children so it renders on top of images
+            if (el._generating) {
+                this.renderFrameLoadingOverlay(el);
             }
         });
 
@@ -2124,7 +2167,8 @@ class CanvasEngine {
             this.ctx.restore();
         }
 
-        this.ctx.restore();
+        this.ctx.restore(); // viewport transform
+        this.ctx.restore(); // DPR scale
 
         // Notify selection change
         if (this.onSelectionChange) {
@@ -2154,8 +2198,10 @@ class CanvasEngine {
         const padding = 100;
         const startX = Math.floor((-this.viewport.x / this.viewport.scale - padding) / gridSize) * gridSize;
         const startY = Math.floor((-this.viewport.y / this.viewport.scale - padding) / gridSize) * gridSize;
-        const endX = Math.ceil((this.canvas.width - this.viewport.x) / this.viewport.scale + padding) / gridSize * gridSize;
-        const endY = Math.ceil((this.canvas.height - this.viewport.y) / this.viewport.scale + padding) / gridSize * gridSize;
+        const cssW = this.cssWidth || this.canvas.width;
+        const cssH = this.cssHeight || this.canvas.height;
+        const endX = Math.ceil((cssW - this.viewport.x) / this.viewport.scale + padding) / gridSize * gridSize;
+        const endY = Math.ceil((cssH - this.viewport.y) / this.viewport.scale + padding) / gridSize * gridSize;
 
         // Limit maximum number of grid dots for performance
         const maxDots = 5000;
@@ -2170,8 +2216,8 @@ class CanvasEngine {
             for (let y = startY; y < endY; y += gridSize) {
                 const screenPos = this.worldToScreen(x, y);
                 // Only draw dots that are within canvas bounds
-                if (screenPos.x >= -10 && screenPos.x <= this.canvas.width + 10 &&
-                    screenPos.y >= -10 && screenPos.y <= this.canvas.height + 10) {
+                if (screenPos.x >= -10 && screenPos.x <= cssW + 10 &&
+                    screenPos.y >= -10 && screenPos.y <= cssH + 10) {
                     this.ctx.fillRect(screenPos.x, screenPos.y, dotSize, dotSize);
                 }
             }
@@ -2189,88 +2235,47 @@ class CanvasEngine {
                 this.ctx.lineWidth = el.strokeWidth;
                 this.ctx.strokeRect(el.x, el.y, el.width, el.height);
 
-                // Draw Frame Headers (Name + Dimensions) — hidden below 10% zoom
+                // Draw Frame Headers (Name + Ratio + Dimensions) — hidden below 10% zoom
                 // Rendered in screen-space for pixel-crisp text at any zoom level
                 if (this.viewport.scale >= 0.10) {
                     const isSelected = this.selectedElements.indexOf(el) !== -1;
-                    const nameColor = isSelected ? '#0099B8' : '#888888';
-                    const dimColor = '#bbbbbb'; // Very light grey, never changes on selection
+                    const labelColor = '#2f3640';
+                    const selectedNameColor = '#0099B8';
 
-                    const screenFontSize = 12; // Fixed 12px on screen
-                    const screenGap = 8; // Fixed 8px gap above frame on screen
+                    const screenFontSize = 12;
+                    const screenGap = 8;
 
-                    // Convert frame corners to screen coords
                     const leftScreen = this.worldToScreen(el.x, el.y);
                     const rightScreen = this.worldToScreen(el.x + el.width, el.y);
 
-                    // Reset transform to identity (canvas has no DPR scaling)
+                    // Reset to DPR-only transform (remove viewport, keep pixel density)
+                    const dpr = this.dpr || 1;
                     this.ctx.save();
-                    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+                    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
                     const textY = leftScreen.y - screenGap;
-
-                    // 1. Name (Left) — light weight for clarity
-                    this.ctx.textAlign = 'left';
+                    this.ctx.font = `400 ${screenFontSize}px Inter, system-ui, sans-serif`;
                     this.ctx.textBaseline = 'bottom';
-                    this.ctx.fillStyle = nameColor;
-                    this.ctx.font = `300 ${screenFontSize}px Inter, system-ui, sans-serif`;
+
+                    // 1. Name (Left) — highlight when selected
+                    this.ctx.textAlign = 'left';
+                    this.ctx.fillStyle = isSelected ? selectedNameColor : labelColor;
                     this.ctx.fillText(el.name || 'Frame', Math.round(leftScreen.x), Math.round(textY));
 
-                    // 2. Dimensions (Right) — thin weight, very light
+                    // 2. Dimensions (Right) — actual image resolution in px if frame has image, else frame size
+                    const childImage = this.elements.find(e => e.type === 'image' && e.parentFrame === el);
+                    const dimLabel = childImage?.image?.naturalWidth
+                        ? this._getDimLabel(childImage.image.naturalWidth, childImage.image.naturalHeight)
+                        : this._getDimLabel(el.width, el.height);
                     this.ctx.textAlign = 'right';
-                    this.ctx.fillStyle = dimColor;
-                    this.ctx.font = `300 ${screenFontSize}px Inter, system-ui, sans-serif`;
-                    const dimText = `${Math.round(el.width)} × ${Math.round(el.height)}`;
-                    this.ctx.fillText(dimText, Math.round(rightScreen.x), Math.round(textY));
+                    this.ctx.fillStyle = labelColor;
+                    this.ctx.fillText(dimLabel, Math.round(rightScreen.x), Math.round(textY));
 
                     this.ctx.restore();
                 }
 
-                // ===== Loading overlay when generating =====
-                if (el._generating) {
-                    const t = ((performance.now() - (el._genStartTime || 0)) / 1000);
-                    this.ctx.save();
-                    this.ctx.beginPath();
-                    this.ctx.rect(el.x, el.y, el.width, el.height);
-                    this.ctx.clip();
-
-                    // Semi-transparent dark overlay
-                    this.ctx.fillStyle = 'rgba(7, 50, 71, 0.06)';
-                    this.ctx.fillRect(el.x, el.y, el.width, el.height);
-
-                    // Subtle shimmer: a sweeping gradient band
-                    const shimmerW = el.width * 0.6;
-                    const cycle = 2.0; // seconds per sweep
-                    const progress = (t % cycle) / cycle;
-                    const shimmerX = el.x - shimmerW + (el.width + shimmerW * 2) * progress;
-
-                    const grad = this.ctx.createLinearGradient(shimmerX, el.y, shimmerX + shimmerW, el.y);
-                    grad.addColorStop(0, 'rgba(255, 255, 255, 0)');
-                    grad.addColorStop(0.3, 'rgba(0, 200, 210, 0.08)');
-                    grad.addColorStop(0.5, 'rgba(0, 200, 210, 0.12)');
-                    grad.addColorStop(0.7, 'rgba(0, 200, 210, 0.08)');
-                    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-                    this.ctx.fillStyle = grad;
-                    this.ctx.fillRect(el.x, el.y, el.width, el.height);
-
-                    // Subtle pulsing dots in center
-                    const cx = el.x + el.width / 2;
-                    const cy = el.y + el.height / 2;
-                    const dotCount = 3;
-                    const dotSpacing = 16 / this.viewport.scale;
-                    const dotRadius = 3 / this.viewport.scale;
-                    for (let i = 0; i < dotCount; i++) {
-                        const dx = cx + (i - 1) * dotSpacing;
-                        const phase = t * 3 + i * 0.6;
-                        const alpha = 0.15 + 0.2 * Math.sin(phase);
-                        this.ctx.beginPath();
-                        this.ctx.arc(dx, cy, dotRadius, 0, Math.PI * 2);
-                        this.ctx.fillStyle = `rgba(0, 200, 210, ${alpha})`;
-                        this.ctx.fill();
-                    }
-
-                    this.ctx.restore();
-                }
+                // Loading overlay is rendered AFTER children in render() loop
+                // so it appears on top of images for replace mode
                 break;
 
             case 'image':
@@ -2604,6 +2609,105 @@ class CanvasEngine {
         } else {
             this.detachFromFrame(element);
         }
+    }
+
+    // Render loading overlay on a generating frame (called after children are drawn)
+    renderFrameLoadingOverlay(el) {
+        const t = ((performance.now() - (el._genStartTime || 0)) / 1000);
+        const hasImage = this.elements.some(
+            child => child.parentFrame === el && child.type === 'image'
+        );
+
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.rect(el.x, el.y, el.width, el.height);
+        this.ctx.clip();
+
+        if (hasImage) {
+            // Replace mode: semi-transparent white overlay on existing image
+            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+        } else {
+            // Empty frame: light tinted overlay
+            this.ctx.fillStyle = 'rgba(7, 50, 71, 0.06)';
+        }
+        this.ctx.fillRect(el.x, el.y, el.width, el.height);
+
+        // Subtle shimmer: a sweeping gradient band
+        const shimmerW = el.width * 0.6;
+        const cycle = 2.0; // seconds per sweep
+        const progress = (t % cycle) / cycle;
+        const shimmerX = el.x - shimmerW + (el.width + shimmerW * 2) * progress;
+
+        const grad = this.ctx.createLinearGradient(shimmerX, el.y, shimmerX + shimmerW, el.y);
+        grad.addColorStop(0, 'rgba(255, 255, 255, 0)');
+        grad.addColorStop(0.3, 'rgba(0, 200, 210, 0.08)');
+        grad.addColorStop(0.5, 'rgba(0, 200, 210, 0.12)');
+        grad.addColorStop(0.7, 'rgba(0, 200, 210, 0.08)');
+        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        this.ctx.fillStyle = grad;
+        this.ctx.fillRect(el.x, el.y, el.width, el.height);
+
+        // Subtle pulsing dots in center
+        const cx = el.x + el.width / 2;
+        const cy = el.y + el.height / 2;
+        const dotCount = 3;
+        const dotSpacing = 16 / this.viewport.scale;
+        const dotRadius = 3 / this.viewport.scale;
+        for (let i = 0; i < dotCount; i++) {
+            const dx = cx + (i - 1) * dotSpacing;
+            const phase = t * 3 + i * 0.6;
+            const alpha = 0.15 + 0.2 * Math.sin(phase);
+            this.ctx.beginPath();
+            this.ctx.arc(dx, cy, dotRadius, 0, Math.PI * 2);
+            this.ctx.fillStyle = `rgba(0, 200, 210, ${alpha})`;
+            this.ctx.fill();
+        }
+
+        this.ctx.restore();
+    }
+
+    /**
+     * Dimension label for frame header.
+     * When frame has an image: shows actual pixel resolution (e.g. 2048 × 2048).
+     * When frame is empty or has no image: shows frame size in canvas units.
+     */
+    _getDimLabel(width, height) {
+        return `${Math.round(width)} × ${Math.round(height)}`;
+    }
+
+    _isStandardRatio(width, height) {
+        const STANDARD_RATIOS = [
+            1, 3/2, 2/3, 3/4, 4/3, 4/5, 5/4, 9/16, 16/9,
+        ];
+        const ratio = width / height;
+        return STANDARD_RATIOS.some(r => Math.abs(ratio - r) < 0.02);
+    }
+
+    _getClosestRatioLabel(width, height) {
+        const STANDARD_RATIOS = [
+            { label: '1:1', value: 1 },
+            { label: '3:2', value: 3 / 2 },
+            { label: '2:3', value: 2 / 3 },
+            { label: '3:4', value: 3 / 4 },
+            { label: '4:3', value: 4 / 3 },
+            { label: '4:5', value: 4 / 5 },
+            { label: '5:4', value: 5 / 4 },
+            { label: '9:16', value: 9 / 16 },
+            { label: '16:9', value: 16 / 9 },
+        ];
+        const ratio = width / height;
+        let closest = STANDARD_RATIOS[0];
+        let minDiff = Math.abs(ratio - closest.value);
+        for (const r of STANDARD_RATIOS) {
+            const diff = Math.abs(ratio - r.value);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closest = r;
+            }
+        }
+        // Only show if within 5% of a standard ratio
+        if (minDiff < 0.05) return closest.label;
+        return '';
     }
 
     // Check if a world position is on a frame's header/name area

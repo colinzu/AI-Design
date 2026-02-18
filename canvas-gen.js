@@ -21,6 +21,30 @@
     let _chipIdCounter = 0;
     function nextChipId() { return 'chip-' + (++_chipIdCounter); }
 
+    // Unique ID counter for panel instances (used to fix SVG gradient ID conflicts)
+    let _panelIdCounter = 0;
+
+    /**
+     * Fix SVG gradient ID conflicts in cloned panel DOM.
+     * Each panel gets unique gradient IDs so multiple panels don't interfere.
+     */
+    function fixSvgGradientIds(dom, panelId) {
+        const suffix = '-p' + panelId;
+        const gradientIds = ['sparkle-grad-col', 'sparkle-grad-think'];
+
+        gradientIds.forEach(oldId => {
+            const newId = oldId + suffix;
+            // Update gradient element IDs
+            dom.querySelectorAll('[id="' + oldId + '"]').forEach(el => {
+                el.id = newId;
+            });
+            // Update all fill="url(#...)" references
+            dom.querySelectorAll('[fill="url(#' + oldId + ')"]').forEach(el => {
+                el.setAttribute('fill', 'url(#' + newId + ')');
+            });
+        });
+    }
+
     // Supported aspect ratios by Gemini API
     const SUPPORTED_RATIOS = [
         { label: '1:1',   value: 1 / 1 },
@@ -100,8 +124,13 @@
             return null;
         }
 
+        const panelId = ++_panelIdCounter;
         const clone = template.content.cloneNode(true);
         const dom = clone.querySelector('.gen-panel');
+
+        // Fix SVG gradient ID conflicts: make IDs unique per panel instance
+        // so multiple panels don't share the same gradient references
+        fixSvgGradientIds(dom, panelId);
 
         // Cache frequently accessed child elements
         const els = {
@@ -815,6 +844,41 @@
         }
     }
 
+    // ==================== Layout Helpers ====================
+
+    /**
+     * Check if an element is visually inside a frame (>50% overlap by area).
+     */
+    function isElementInsideFrame(el, frame) {
+        const overlapX = Math.max(0,
+            Math.min(el.x + el.width, frame.x + frame.width) - Math.max(el.x, frame.x));
+        const overlapY = Math.max(0,
+            Math.min(el.y + el.height, frame.y + frame.height) - Math.max(el.y, frame.y));
+        const overlapArea = overlapX * overlapY;
+        const elArea = el.width * el.height;
+        return elArea > 0 && (overlapArea / elArea) > 0.5;
+    }
+
+    /**
+     * Push all top-level elements (and their frame children) to the right
+     * if their left edge >= startX. Used to make room for new generated frames.
+     */
+    function pushElementsRight(engine, startX, shiftAmount, excludeSet) {
+        engine.elements.forEach(el => {
+            if (excludeSet && excludeSet.has(el)) return;
+            if (el.parentFrame) return; // Children move with their parent frame
+            if (el.x >= startX) {
+                el.x += shiftAmount;
+                // Also move children of frames
+                if (el.type === 'frame') {
+                    engine.getFrameChildren(el).forEach(child => {
+                        child.x += shiftAmount;
+                    });
+                }
+            }
+        });
+    }
+
     // ==================== API Call & Generation ====================
     async function handleGenerate(instance) {
         const { els, state } = instance;
@@ -853,27 +917,43 @@
         // Determine generation mode
         const sourceFrame = genContext.frame;
         const selectedElements = genContext.selectedElements;
+        // Check for images inside the frame (by parentFrame or by position overlap)
         const isReplaceMode = sourceFrame && (
             selectedElements.some(el => el !== sourceFrame && el.type !== 'frame') ||
-            engine.elements.some(el => el.parentFrame === sourceFrame && el.type === 'image')
+            engine.elements.some(el => el.parentFrame === sourceFrame && el.type === 'image') ||
+            engine.elements.some(el => !el.parentFrame && el.type === 'image' &&
+                isElementInsideFrame(el, sourceFrame))
         );
 
         const refRect = sourceFrame || genContext.anchor;
         const FRAME_GAP = 30;
 
-        // --- PRE-CREATE placeholder frames for multi-image (Bug 3) ---
+        // --- PRE-CREATE placeholder frames for multi-image ---
+        // Place new frames adjacent to source frame and push existing content
         const targetSlots = []; // { frame, isNew }
+        const numNewFrames = genContext.imageCount - (sourceFrame ? 1 : 0);
+
+        if (sourceFrame && numNewFrames > 0) {
+            // Push existing elements to the right to make room for new frames
+            const pushStartX = sourceFrame.x + sourceFrame.width;
+            const pushAmount = numNewFrames * (refRect.width + FRAME_GAP);
+            const excludeSet = new Set([sourceFrame]);
+            // Include source frame children in exclude set
+            engine.getFrameChildren(sourceFrame).forEach(c => excludeSet.add(c));
+            pushElementsRight(engine, pushStartX, pushAmount, excludeSet);
+        }
 
         if (isReplaceMode && sourceFrame) {
-            // Bug 4: Replace mode — mark source frame as loading (overlay on image)
+            // Replace mode — mark source frame as loading (overlay on image)
             sourceFrame._generating = true;
             sourceFrame._genStartTime = performance.now();
             targetSlots.push({ frame: sourceFrame, isNew: false });
 
-            // Additional images get new frames to the right
+            // Additional images get new frames adjacent to the right
             for (let i = 1; i < genContext.imageCount; i++) {
-                const pos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
-                const f = createEmptyFrame(engine, pos.x, pos.y, refRect.width, refRect.height, sourceFrame.fill);
+                const x = sourceFrame.x + (refRect.width + FRAME_GAP) * i;
+                const y = sourceFrame.y;
+                const f = createEmptyFrame(engine, x, y, refRect.width, refRect.height, sourceFrame.fill);
                 f._generating = true;
                 f._genStartTime = performance.now();
                 targetSlots.push({ frame: f, isNew: true });
@@ -884,18 +964,22 @@
             sourceFrame._genStartTime = performance.now();
             targetSlots.push({ frame: sourceFrame, isNew: false });
 
+            // Additional frames adjacent to the right
             for (let i = 1; i < genContext.imageCount; i++) {
-                const pos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
-                const f = createEmptyFrame(engine, pos.x, pos.y, refRect.width, refRect.height, sourceFrame.fill);
+                const x = sourceFrame.x + (refRect.width + FRAME_GAP) * i;
+                const y = sourceFrame.y;
+                const f = createEmptyFrame(engine, x, y, refRect.width, refRect.height, sourceFrame.fill);
                 f._generating = true;
                 f._genStartTime = performance.now();
                 targetSlots.push({ frame: f, isNew: true });
             }
         } else {
-            // No frame — create new frames
+            // No frame — create new frames in a row
+            const firstPos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
             for (let i = 0; i < genContext.imageCount; i++) {
-                const pos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
-                const f = createEmptyFrame(engine, pos.x, pos.y, refRect.width, refRect.height, '#FFFFFF');
+                const x = firstPos.x + (refRect.width + FRAME_GAP) * i;
+                const y = firstPos.y;
+                const f = createEmptyFrame(engine, x, y, refRect.width, refRect.height, '#FFFFFF');
                 f._generating = true;
                 f._genStartTime = performance.now();
                 targetSlots.push({ frame: f, isNew: true });
@@ -917,16 +1001,44 @@
             }
         }
 
-        const aspectRatio = getClosestAspectRatio(refRect.width, refRect.height);
-        let imageSize = '1K';
-        if (/\b4[kK]\b/.test(prompt)) imageSize = '4K';
+        // --- Resolution / quality: user-specified takes priority, else 2K default ---
+        let imageSize = '2K';
+        if      (/\b4[kK]\b/.test(prompt)) imageSize = '4K';
         else if (/\b2[kK]\b/.test(prompt)) imageSize = '2K';
+        else if (/\b1[kK]\b/.test(prompt)) imageSize = '1K';
+
+        // --- Aspect ratio: user-specified (e.g. "16:9") takes priority, else Frame dimensions ---
+        let aspectRatio;
+        const ratioMatch = prompt.match(/\b(\d+)\s*[:\uFF1A]\s*(\d+)\b/);
+        if (ratioMatch) {
+            const rW = parseInt(ratioMatch[1]);
+            const rH = parseInt(ratioMatch[2]);
+            if (rW > 0 && rH > 0) {
+                const userRatio = rW / rH;
+                let best = SUPPORTED_RATIOS[0], bestDiff = Math.abs(userRatio - best.value);
+                for (const sr of SUPPORTED_RATIOS) {
+                    const d = Math.abs(userRatio - sr.value);
+                    if (d < bestDiff) { bestDiff = d; best = sr; }
+                }
+                aspectRatio = best.label;
+            } else {
+                aspectRatio = getClosestAspectRatio(refRect.width, refRect.height);
+            }
+        } else {
+            aspectRatio = getClosestAspectRatio(refRect.width, refRect.height);
+        }
 
         const requestBody = {
-            contents: [{ parts }],
+            contents: [{
+                role: 'user',
+                parts
+            }],
             generationConfig: {
                 responseModalities: ['TEXT', 'IMAGE'],
-                imageConfig: { aspectRatio, imageSize }
+                imageConfig: { 
+                    aspectRatio,
+                    imageSize
+                }
             }
         };
 
@@ -1028,17 +1140,44 @@
 
     /**
      * Place a loaded image into a frame.
+     * Resizes the frame to match the image's aspect ratio so the image is not
+     * squashed or stretched (frame adapts to image, not the other way around).
      * If isReplace=true, remove existing images in the frame first.
      */
     function placeImageIntoFrame(engine, frame, img, dataUrl, isReplace) {
         if (isReplace) {
-            // Remove existing images in frame
-            const old = engine.elements.filter(el => el.parentFrame === frame && el.type === 'image');
+            const old = engine.elements.filter(el =>
+                el.type === 'image' && (
+                    el.parentFrame === frame ||
+                    (!el.parentFrame && isElementInsideFrame(el, frame))
+                )
+            );
             old.forEach(child => {
                 const idx = engine.elements.indexOf(child);
                 if (idx !== -1) engine.elements.splice(idx, 1);
             });
         }
+
+        const iw = img.naturalWidth || img.width || 1;
+        const ih = img.naturalHeight || img.height || 1;
+        const imageAspect = iw / ih;
+
+        // Resize frame to match image aspect ratio (keep center, keep same "max side" in logical units)
+        const maxSide = Math.max(frame.width, frame.height);
+        let newW, newH;
+        if (imageAspect >= 1) {
+            newW = maxSide;
+            newH = maxSide / imageAspect;
+        } else {
+            newH = maxSide;
+            newW = maxSide * imageAspect;
+        }
+        const centerX = frame.x + frame.width / 2;
+        const centerY = frame.y + frame.height / 2;
+        frame.x = centerX - newW / 2;
+        frame.y = centerY - newH / 2;
+        frame.width = newW;
+        frame.height = newH;
 
         const imageElement = {
             type: 'image',
@@ -1052,8 +1191,9 @@
         };
         engine.elements.push(imageElement);
 
-        // Auto-name frame
         autoNameFrame(frame, dataUrl);
+
+        if (typeof engine.saveState === 'function') engine.saveState();
     }
 
     function loadImageFromData(dataUrl) {
@@ -1248,6 +1388,50 @@
         }
         _frameAnimRAF = requestAnimationFrame(tick);
     }
+
+    // ==================== Auto-Generation API ====================
+
+    /**
+     * Programmatically create a 1:1 Frame at the canvas centre, populate the
+     * gen-panel with the given prompt, and start generation immediately.
+     * Called by canvas.js when the canvas was opened from the homepage with
+     * a pre-supplied prompt (autoGen=1 query param).
+     */
+    window.GenPanel = {
+        triggerAutoGeneration(promptText) {
+            const engine = window.canvasEngine;
+            if (!engine) {
+                setTimeout(() => window.GenPanel.triggerAutoGeneration(promptText), 100);
+                return;
+            }
+
+            // Place a 1:1 square Frame at the viewport centre
+            const FRAME_SIZE = 800; // logical canvas units
+            const cx = (window.innerWidth  / 2 - engine.viewport.x) / engine.viewport.scale;
+            const cy = (window.innerHeight / 2 - engine.viewport.y) / engine.viewport.scale;
+            const frame = createEmptyFrame(engine, cx - FRAME_SIZE / 2, cy - FRAME_SIZE / 2, FRAME_SIZE, FRAME_SIZE, '#FFFFFF');
+            engine.render();
+
+            // Trigger the selection → gen-panel will be created by onSelectionChange
+            if (engine.onSelectionChange) engine.onSelectionChange([frame]);
+
+            // Give the panel one animation frame to initialise, then set prompt + fire
+            requestAnimationFrame(() => {
+                const key      = getPanelKey([frame]);
+                const instance = panelRegistry.get(key);
+                if (!instance) return;
+
+                if (instance.els.editor && promptText) {
+                    instance.els.editor.textContent = promptText;
+                    instance.els.editor.classList.remove('show-placeholder');
+                    updateSendState(instance);
+                }
+
+                // Small delay so UI settles before generation starts
+                setTimeout(() => handleGenerate(instance), 80);
+            });
+        }
+    };
 
     // ==================== Bootstrap ====================
     function waitForEngine() {

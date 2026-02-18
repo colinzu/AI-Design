@@ -6,11 +6,151 @@ document.addEventListener('DOMContentLoaded', () => {
     const canvas = document.getElementById('infinite-canvas');
     const engine = new CanvasEngine(canvas);
 
+    // ==================== Project Persistence ====================
+
+    // Determine project ID from URL, or generate a new one
+    const urlParams = new URLSearchParams(window.location.search);
+    let projectId = urlParams.get('id');
+    if (!projectId) {
+        projectId = ProjectManager.generateId();
+        window.history.replaceState({}, '', window.location.pathname + '?id=' + projectId);
+    }
+
+    let _isLoadingProject = false;
+    let _autosaveTimer = null;  // must be declared here so scheduleAutosave & beforeunload share it
+
+    function scheduleAutosave() {
+        if (_isLoadingProject) return;
+        clearTimeout(_autosaveTimer);
+        _autosaveTimer = setTimeout(async () => {
+            const name = projectNameInput ? projectNameInput.value.trim() || 'Untitled Project' : 'Untitled Project';
+            await ProjectManager.save(projectId, name, engine.elements, engine.viewport, engine.canvas);
+        }, 1500);
+    }
+
+    // Hook into engine.saveState so every undo-able action triggers auto-save
+    const _origSaveState = engine.saveState.bind(engine);
+    engine.saveState = function (...args) {
+        _origSaveState(...args);
+        scheduleAutosave();
+    };
+
+    // Best-effort save on page unload (fire-and-forget, reuses existing thumbnail)
+    window.addEventListener('beforeunload', () => {
+        clearTimeout(_autosaveTimer);
+        const name = projectNameInput ? projectNameInput.value.trim() || 'Untitled Project' : 'Untitled Project';
+        ProjectManager.saveAndForget(projectId, name, engine.elements, engine.viewport);
+    });
+
+    // Load existing project data (async, runs after the rest of the init)
+    async function initProject() {
+        const project = await ProjectManager.load(projectId);
+        if (!project || !project.elements || project.elements.length === 0) return;
+
+        _isLoadingProject = true;
+        try {
+            engine.elements = project.elements;
+            if (project.viewport) {
+                engine.viewport.x     = project.viewport.x;
+                engine.viewport.y     = project.viewport.y;
+                engine.viewport.scale = project.viewport.scale;
+            }
+            if (projectNameInput && project.name) {
+                projectNameInput.value = project.name;
+                document.title = project.name + ' - AI Design';
+            }
+            engine.render();
+        } finally {
+            _isLoadingProject = false;
+        }
+    }
+    // ==================== Auth: resolve user BEFORE loading project ====================
+    // Critical: must set correct userId key before initProject reads localStorage
+    (async () => {
+        if (typeof getCurrentUser === 'function') {
+            try {
+                const user = await getCurrentUser();
+                if (user?.id) await ProjectManager.setUserId(user.id);
+            } catch {}
+        }
+        await initProject();
+
+        // Auto-generation from homepage prompt
+        const autoGen = urlParams.get('autoGen');
+        if (autoGen === '1') {
+            const promptKey = 'aime_autostart_' + projectId;
+            const raw = localStorage.getItem(promptKey);
+            if (raw) {
+                localStorage.removeItem(promptKey);
+                try {
+                    const { text } = JSON.parse(raw);
+                    if (text) {
+                        // Wait for GenPanel to be initialized (canvas-gen.js bootstraps async)
+                        const waitAndGenerate = () => {
+                            if (window.GenPanel && window.GenPanel.triggerAutoGeneration) {
+                                window.GenPanel.triggerAutoGeneration(text);
+                            } else {
+                                setTimeout(waitAndGenerate, 100);
+                            }
+                        };
+                        setTimeout(waitAndGenerate, 200);
+                    }
+                } catch { /* ignore */ }
+            }
+        }
+
+        // After project loaded, sync ongoing auth state changes
+        if (typeof onAuthStateChange === 'function') {
+            onAuthStateChange(({ loggedIn, user }) => {
+                const newId = loggedIn && user?.id ? user.id : 'guest';
+                if (newId !== ProjectManager.getUserId()) {
+                    ProjectManager.setUserId(newId);
+                }
+                updateCanvasAuthUI(loggedIn, user || null);
+            });
+        }
+
+        // Cross-tab: another tab changed account → save current work + show banner
+        if (typeof listenForAuthBroadcast === 'function') {
+            listenForAuthBroadcast(({ event, userId: broadcastUserId }) => {
+                const isChange = event === 'SIGNED_OUT' ||
+                    (event === 'SIGNED_IN' && broadcastUserId !== ProjectManager.getUserId());
+                if (!isChange) return;
+                clearTimeout(_autosaveTimer);
+                const n = projectNameInput ? projectNameInput.value.trim() || 'Untitled Project' : 'Untitled Project';
+                ProjectManager.saveAndForget(projectId, n, engine.elements, engine.viewport);
+                showAuthSyncBanner(event === 'SIGNED_OUT' ? 'signed-out' : 'account-changed');
+            });
+        }
+    })();
+
+    function showAuthSyncBanner(reason) {
+        if (document.getElementById('auth-sync-banner')) return;
+        const msg = reason === 'signed-out'
+            ? 'You signed out in another tab.'
+            : 'Account changed in another tab.';
+        const b = document.createElement('div');
+        b.id = 'auth-sync-banner';
+        b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#1a1a2e;color:#fff;padding:12px 20px;display:flex;align-items:center;justify-content:center;gap:16px;font-size:14px;font-family:Inter,sans-serif;box-shadow:0 2px 12px rgba(0,0,0,.3)';
+        b.innerHTML = `<span>${msg} Your work has been saved.</span>
+            <button onclick="location.reload()" style="background:#fff;color:#1a1a2e;border:none;border-radius:6px;padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer">Reload</button>
+            <button onclick="this.parentElement.remove()" style="background:transparent;color:rgba(255,255,255,.6);border:none;font-size:20px;cursor:pointer;line-height:1">×</button>`;
+        document.body.prepend(b);
+    }
+
     // ==================== Project Menu ====================
 
     const logoMenuBtn = document.getElementById('logo-btn');
     const projectMenu = document.getElementById('project-menu');
     const projectNameInput = document.getElementById('project-name');
+
+    // Sync document title and auto-save when project name changes
+    if (projectNameInput) {
+        projectNameInput.addEventListener('input', () => {
+            document.title = (projectNameInput.value.trim() || 'Untitled Project') + ' - AI Design';
+            scheduleAutosave();
+        });
+    }
 
     // Toggle project menu
     function toggleProjectMenu() {
@@ -66,11 +206,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const action = menuItem.dataset.action;
 
         switch (action) {
+            case 'go-home':
+                window.location.href = 'index.html';
+                break;
             case 'new-project':
                 window.open('canvas.html', '_blank');
-                break;
-            case 'recent-projects':
-                window.location.href = 'index.html';
                 break;
             case 'undo':
                 engine.undo();
@@ -79,8 +219,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 engine.redo();
                 break;
             case 'move-to-trash':
-                if (confirm('Are you sure you want to move this project to trash?')) {
-                    alert('Project moved to trash');
+                if (confirm('Delete this project? This cannot be undone.')) {
+                    ProjectManager.delete(projectId);
                     window.location.href = 'index.html';
                 }
                 break;
@@ -88,6 +228,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
         projectMenu.style.display = 'none';
     });
+
+    // Recent Projects hover submenu
+    const recentItem = document.getElementById('recent-projects-item');
+    const recentSubmenu = document.getElementById('recent-projects-submenu');
+    if (recentItem && recentSubmenu) {
+        recentItem.addEventListener('mouseenter', () => {
+            const projects = (typeof ProjectManager !== 'undefined')
+                ? ProjectManager.getAll().slice(0, 5)
+                : [];
+            if (projects.length === 0) {
+                recentSubmenu.innerHTML = '<div class="recent-submenu-empty">No recent projects</div>';
+            } else {
+                recentSubmenu.innerHTML = projects.map(p => `
+                    <div class="recent-submenu-item" data-id="${p.id}">
+                        ${p.thumbnail
+                            ? `<img class="recent-submenu-thumb" src="${p.thumbnail}" alt="">`
+                            : `<div class="recent-submenu-thumb recent-submenu-thumb-empty"></div>`}
+                        <span class="recent-submenu-name">${escapeHtml(p.name || 'Untitled Project')}</span>
+                    </div>
+                `).join('');
+                recentSubmenu.querySelectorAll('.recent-submenu-item').forEach(el => {
+                    el.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        window.open('canvas.html?id=' + el.dataset.id, '_blank');
+                        projectMenu.style.display = 'none';
+                    });
+                });
+            }
+            recentSubmenu.classList.add('open');
+        });
+        recentItem.addEventListener('mouseleave', () => {
+            recentSubmenu.classList.remove('open');
+        });
+    }
+
+    function escapeHtml(str) {
+        return String(str)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
 
     // View toggles
     const pixelGridToggle = document.getElementById('toggle-pixel-grid');
@@ -446,13 +626,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Update ratio select
                 const currentRatio = frame.width / frame.height;
-                // Simple check for standard ratios
-                if (Math.abs(currentRatio - 1) < 0.01) ratioSelect.value = '1:1';
-                else if (Math.abs(currentRatio - 4 / 3) < 0.01) ratioSelect.value = '4:3';
-                else if (Math.abs(currentRatio - 3 / 4) < 0.01) ratioSelect.value = '3:4';
-                else if (Math.abs(currentRatio - 16 / 9) < 0.01) ratioSelect.value = '16:9';
-                else if (Math.abs(currentRatio - 9 / 16) < 0.01) ratioSelect.value = '9:16';
-                else ratioSelect.value = 'custom';
+                const RATIO_MAP = [
+                    { value: '1:1',  ratio: 1 },
+                    { value: '2:3',  ratio: 2/3 },
+                    { value: '3:2',  ratio: 3/2 },
+                    { value: '3:4',  ratio: 3/4 },
+                    { value: '4:3',  ratio: 4/3 },
+                    { value: '9:16', ratio: 9/16 },
+                    { value: '16:9', ratio: 16/9 },
+                ];
+                const matched = RATIO_MAP.find(r => Math.abs(currentRatio - r.ratio) < 0.02);
+                ratioSelect.value = matched ? matched.value : 'custom';
 
             } else {
                 // Hide bar
@@ -616,4 +800,307 @@ document.addEventListener('DOMContentLoaded', () => {
             link.click();
         });
     }
-});
+
+    // ==================== Canvas Auth UI (header right-section) ====================
+
+    // Use the same element IDs as index.html so the header is identical
+    function updateCanvasAuthUI(loggedIn, user) {
+        const loginBtn   = document.getElementById('header-login-btn');
+        const avatarWrap = document.getElementById('avatar-wrapper');
+        const avatarImg  = document.getElementById('user-avatar-img');
+        const dropAvatar = document.getElementById('dropdown-avatar-img');
+        const dropEmail  = document.getElementById('dropdown-user-email');
+
+        if (loggedIn) {
+            if (loginBtn)   loginBtn.style.display   = 'none';
+            if (avatarWrap) avatarWrap.style.display = '';
+            const url = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
+            if (url) {
+                if (avatarImg)  { avatarImg.src  = url; avatarImg.alt  = user.email || ''; }
+                if (dropAvatar) { dropAvatar.src = url; dropAvatar.alt = user.email || ''; }
+            }
+            if (dropEmail) dropEmail.textContent = user?.email || '';
+        } else {
+            if (loginBtn)   loginBtn.style.display   = '';
+            if (avatarWrap) avatarWrap.style.display = 'none';
+        }
+    }
+
+    // Header auth button wiring (same IDs as index.html)
+    const headerLoginBtn = document.getElementById('header-login-btn');
+    if (headerLoginBtn) {
+        headerLoginBtn.addEventListener('click', () => {
+            const overlay = document.getElementById('auth-modal-overlay');
+            if (overlay) {
+                const loginPage = document.getElementById('auth-page-login');
+                const otpPage   = document.getElementById('auth-page-otp');
+                if (loginPage) loginPage.classList.remove('auth-page-hidden');
+                if (otpPage)   otpPage.classList.add('auth-page-hidden');
+                overlay.classList.add('active');
+            } else {
+                window.location.href = 'index.html';
+            }
+        });
+    }
+
+    // ---- Language picker (standalone, no script.js dependency) ----
+    let _canvasLang = localStorage.getItem('aime_language') || 'en';
+    const _langLabels = { en: 'English', zh: '简体中文' };
+
+    function _updateLangDisplay() {
+        const el = document.getElementById('language-display');
+        if (el) el.textContent = _langLabels[_canvasLang] || 'English';
+    }
+    _updateLangDisplay();
+
+    function _hideLangPicker() {
+        const picker = document.getElementById('canvas-lang-picker');
+        if (picker) picker.classList.remove('active');
+    }
+
+    function _showLangPicker() {
+        // Mutually exclusive: close avatar dropdown
+        const ad = document.getElementById('avatar-dropdown');
+        if (ad) ad.classList.remove('open');
+
+        let picker = document.getElementById('canvas-lang-picker');
+        if (!picker) {
+            picker = document.createElement('div');
+            picker.id = 'canvas-lang-picker';
+            picker.className = 'floating-picker language-picker-panel';
+            picker.style.position = 'fixed';
+            document.body.appendChild(picker);
+        }
+
+        picker.innerHTML = Object.entries(_langLabels).map(([code, label]) => `
+            <div class="language-item ${_canvasLang === code ? 'selected' : ''}" data-lang="${code}">
+                <span class="language-label">${label}</span>
+                <svg class="language-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="20 6 9 17 4 12"/>
+                </svg>
+            </div>
+        `).join('');
+
+        const langBtnEl = document.getElementById('language-btn');
+        if (langBtnEl) {
+            const r = langBtnEl.getBoundingClientRect();
+            picker.style.top   = (r.bottom + 8) + 'px';
+            picker.style.left  = 'auto';
+            picker.style.right = (window.innerWidth - r.right) + 'px';
+        }
+
+        picker.querySelectorAll('.language-item').forEach(item => {
+            item.addEventListener('click', () => {
+                _canvasLang = item.dataset.lang;
+                localStorage.setItem('aime_language', _canvasLang);
+                _updateLangDisplay();
+                _hideLangPicker();
+            });
+        });
+
+        picker.classList.add('active');
+    }
+
+    // Language button
+    const langBtn = document.getElementById('language-btn');
+    if (langBtn) {
+        langBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const picker = document.getElementById('canvas-lang-picker');
+            if (picker && picker.classList.contains('active')) {
+                _hideLangPicker();
+            } else {
+                _showLangPicker();
+            }
+        });
+    }
+
+    // Avatar dropdown (mutually exclusive with language picker)
+    const avatarBtn      = document.getElementById('user-avatar-btn');
+    const avatarDropdown = document.getElementById('avatar-dropdown');
+    if (avatarBtn && avatarDropdown) {
+        avatarBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            _hideLangPicker();  // close lang picker when opening avatar
+            avatarDropdown.classList.toggle('open');
+        });
+    }
+
+    const logoutBtn = document.getElementById('avatar-logout-btn');
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', async () => {
+            if (typeof signOut === 'function') await signOut();
+            ProjectManager.setUserId('guest');
+            updateCanvasAuthUI(false, null);
+            if (avatarDropdown) avatarDropdown.classList.remove('open');
+        });
+    }
+
+    // Close both pickers on outside click
+    document.addEventListener('click', (e) => {
+        const langPicker = document.getElementById('canvas-lang-picker');
+        const langBtnEl2 = document.getElementById('language-btn');
+        if (langPicker && !langPicker.contains(e.target) && (!langBtnEl2 || !langBtnEl2.contains(e.target))) {
+            _hideLangPicker();
+        }
+        if (avatarDropdown && !avatarDropdown.contains(e.target) && (!avatarBtn || !avatarBtn.contains(e.target))) {
+            avatarDropdown.classList.remove('open');
+        }
+    });
+
+    // Initial auth UI state
+    updateCanvasAuthUI(false, null);
+
+    // Initialize auth modal (same flow as index.html)
+    // Re-declare here since script.js is not loaded on canvas page
+    _initCanvasAuthModal();
+
+    function _initCanvasAuthModal() {
+        const overlay  = document.getElementById('auth-modal-overlay');
+        const closeBtn = document.getElementById('auth-modal-close');
+        const backBtn  = document.getElementById('auth-back-btn');
+        const googleBtn = document.getElementById('auth-google-btn');
+        const appleBtn  = document.getElementById('auth-apple-btn');
+        const emailInput = document.getElementById('auth-email-input');
+        const emailContinueBtn = document.getElementById('auth-email-continue-btn');
+        const resendBtn = document.getElementById('auth-resend-btn');
+
+        let _otpTimer = null;
+        let _pendingEmail = '';
+
+        function _hideModal() {
+            if (overlay) overlay.classList.remove('active');
+            _clearTimer();
+            if (emailInput) emailInput.value = '';
+            document.querySelectorAll('.auth-otp-digit').forEach(i => { i.value = ''; i.classList.remove('filled','error'); });
+        }
+        function _showPage(page) {
+            const lp = document.getElementById('auth-page-login');
+            const op = document.getElementById('auth-page-otp');
+            if (page === 'login') { lp?.classList.remove('auth-page-hidden'); op?.classList.add('auth-page-hidden'); }
+            else { lp?.classList.add('auth-page-hidden'); op?.classList.remove('auth-page-hidden'); }
+        }
+        function _clearTimer() { clearInterval(_otpTimer); }
+        function _startCountdown() {
+            _clearTimer();
+            let s = 60;
+            const cd = document.getElementById('auth-countdown');
+            const rt = document.getElementById('auth-resend-text');
+            if (cd) cd.textContent = s;
+            if (rt) rt.style.display = '';
+            if (resendBtn) resendBtn.style.display = 'none';
+            _otpTimer = setInterval(() => {
+                s--;
+                if (cd) cd.textContent = s;
+                if (s <= 0) { _clearTimer(); if (rt) rt.style.display = 'none'; if (resendBtn) resendBtn.style.display = 'block'; }
+            }, 1000);
+        }
+        function _completeLogin(user) {
+            const uid = user?.id || 'authenticated';
+            ProjectManager.setUserId(uid);
+            updateCanvasAuthUI(true, user);
+            _hideModal();
+        }
+        function _setLoading(btn, on) { if (btn) { btn.disabled = on; btn.style.opacity = on ? '0.7' : ''; } }
+        function _isEmail(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
+
+        if (overlay) overlay.addEventListener('click', e => { if (e.target === overlay) _hideModal(); });
+        if (closeBtn) closeBtn.addEventListener('click', _hideModal);
+        if (backBtn) backBtn.addEventListener('click', () => { _showPage('login'); _clearTimer(); });
+
+        if (googleBtn) googleBtn.addEventListener('click', async () => {
+            _setLoading(googleBtn, true);
+            const { error } = await signInWithGoogle();
+            if (error?.message === 'not_configured') _completeLogin({ email: 'demo@example.com' });
+            else if (error) console.warn('Google auth error:', error.message);
+            _setLoading(googleBtn, false);
+        });
+        if (appleBtn) appleBtn.addEventListener('click', async () => {
+            _setLoading(appleBtn, true);
+            const { error } = await signInWithApple();
+            if (error?.message === 'not_configured') _completeLogin({ email: 'demo@example.com' });
+            else if (error) console.warn('Apple auth error:', error.message);
+            _setLoading(appleBtn, false);
+        });
+
+        if (emailContinueBtn) emailContinueBtn.addEventListener('click', async () => {
+            const email = emailInput?.value.trim() || '';
+            if (!_isEmail(email)) { if (emailInput) { emailInput.focus(); emailInput.style.borderColor = '#E53E3E'; setTimeout(() => emailInput.style.borderColor = '', 1500); } return; }
+            _setLoading(emailContinueBtn, true);
+            const { error, simulated } = await sendEmailOTP(email);
+            _setLoading(emailContinueBtn, false);
+            if (error) { console.warn('OTP send error:', error.message); return; }
+            _pendingEmail = email;
+            const oe = document.getElementById('auth-otp-email');
+            if (oe) oe.textContent = email;
+            if (simulated) {
+                const desc = document.querySelector('.auth-otp-desc');
+                if (desc && !desc.querySelector('.dev-hint')) {
+                    const h = document.createElement('span');
+                    h.className = 'dev-hint';
+                    h.style.cssText = 'display:block;margin-top:8px;font-size:11px;color:#F59E0B;background:rgba(245,158,11,.1);padding:4px 8px;border-radius:6px;';
+                    h.textContent = '⚠️  Dev mode: any 6-digit code works';
+                    desc.appendChild(h);
+                }
+            }
+            _showPage('otp');
+            _startCountdown();
+            document.querySelectorAll('.auth-otp-digit').forEach(i => { i.value = ''; i.classList.remove('filled','error'); });
+            setTimeout(() => document.querySelector('.auth-otp-digit')?.focus(), 100);
+        });
+        if (emailInput) {
+            emailInput.addEventListener('keydown', e => { if (e.key === 'Enter') emailContinueBtn?.click(); });
+        }
+        if (resendBtn) resendBtn.addEventListener('click', async () => {
+            if (_pendingEmail) await sendEmailOTP(_pendingEmail);
+            _startCountdown();
+        });
+
+        // OTP digit wiring
+        const digits = document.querySelectorAll('.auth-otp-digit');
+        digits.forEach((inp, i) => {
+            inp.addEventListener('input', e => {
+                const v = e.target.value.replace(/\D/g, '');
+                e.target.value = v ? v[0] : '';
+                if (v) { inp.classList.add('filled'); if (i < digits.length - 1) digits[i+1].focus(); else _checkOtp(digits); }
+                else inp.classList.remove('filled');
+            });
+            inp.addEventListener('keydown', e => {
+                if (e.key === 'Backspace' && !inp.value && i > 0) { digits[i-1].focus(); digits[i-1].value = ''; digits[i-1].classList.remove('filled'); }
+            });
+            inp.addEventListener('paste', e => {
+                e.preventDefault();
+                const p = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '');
+                p.split('').forEach((c, j) => { if (i+j < digits.length) { digits[i+j].value = c; digits[i+j].classList.add('filled'); } });
+                digits[Math.min(i + p.length, digits.length - 1)].focus();
+                _checkOtp(digits);
+            });
+        });
+
+        async function _checkOtp(inputs) {
+            const code = Array.from(inputs).map(x => x.value).join('');
+            if (code.length !== 6) return;
+            inputs.forEach(x => x.disabled = true);
+            const { data, error } = await verifyEmailOTP(_pendingEmail, code);
+            inputs.forEach(x => x.disabled = false);
+            if (error) {
+                inputs.forEach(x => x.classList.add('error'));
+                setTimeout(() => inputs.forEach(x => x.classList.remove('error')), 600);
+                inputs.forEach(x => { x.value = ''; x.classList.remove('filled'); });
+                inputs[0].focus();
+                return;
+            }
+            _completeLogin(data?.user || { email: _pendingEmail });
+        }
+
+        // Listen for session restored after OAuth redirect
+        if (typeof onAuthStateChange === 'function') {
+            onAuthStateChange(({ loggedIn, user }) => {
+                if (loggedIn && user) _completeLogin(user);
+            });
+        }
+
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay?.classList.contains('active')) _hideModal(); });
+    }
+
+});  // end DOMContentLoaded

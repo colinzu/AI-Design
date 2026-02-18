@@ -42,10 +42,19 @@
             <input type="text" class="project-name" value="Untitled Project" id="project-name"
                 aria-label="Project Name">
         </div>
+
     </header>
 
     <!-- Project Menu Dropdown -->
     <div class="dropdown-menu" id="project-menu" style="display: none;">
+        <button class="menu-item" data-action="go-home">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                <polyline points="9 22 9 12 15 12 15 22"/>
+            </svg>
+            <span>Home</span>
+        </button>
+        <div class="menu-separator"></div>
         <button class="menu-item" data-action="new-project">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -54,13 +63,17 @@
             <span>New Project</span>
             <span class="shortcut">Cmd+N</span>
         </button>
-        <button class="menu-item" data-action="recent-projects">
+        <div class="menu-item has-submenu" id="recent-projects-item">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"></circle>
                 <polyline points="12 6 12 12 16 14"></polyline>
             </svg>
             <span>Recent Projects</span>
-        </button>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-left:auto;opacity:0.5">
+                <polyline points="9 18 15 12 9 6"/>
+            </svg>
+            <div class="recent-projects-submenu" id="recent-projects-submenu"></div>
+        </div>
         <div class="menu-separator"></div>
         <button class="menu-item" data-action="undo">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -101,7 +114,7 @@
         </button>
     </div>
 
-    <!-- Top Right Controls (Embedded in Canvas) -->
+    <!-- Top Right Controls (same structure as index.html) -->
     <div class="header-right">
         <button class="language-text-btn" id="language-btn" aria-label="Language">
             <span id="language-display">English</span>
@@ -112,9 +125,30 @@
                 <path d="M13.73 21a2 2 0 0 1-3.46 0" />
             </svg>
         </button>
-        <button class="user-avatar" aria-label="User menu">
-            <img src="assets/images/avatar.png" alt="User">
-        </button>
+        <!-- Logged-out: Login button -->
+        <button class="header-login-btn" id="header-login-btn" aria-label="Login">Login</button>
+
+        <!-- Logged-in: Avatar + dropdown -->
+        <div class="avatar-wrapper" id="avatar-wrapper" style="display:none;">
+            <button class="user-avatar" id="user-avatar-btn" aria-label="User menu">
+                <img src="assets/images/avatar.png" alt="User" id="user-avatar-img">
+            </button>
+            <div class="avatar-dropdown" id="avatar-dropdown">
+                <div class="avatar-dropdown-user">
+                    <img src="assets/images/avatar.png" alt="" id="dropdown-avatar-img">
+                    <span id="dropdown-user-email">user@example.com</span>
+                </div>
+                <div class="avatar-dropdown-divider"></div>
+                <button class="avatar-dropdown-item avatar-logout-btn" id="avatar-logout-btn">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                        <polyline points="16 17 21 12 16 7"/>
+                        <line x1="21" y1="12" x2="9" y2="12"/>
+                    </svg>
+                    Sign out
+                </button>
+            </div>
+        </div>
     </div>
 
     <!-- Left Sidebar (Continuous Container) -->
@@ -331,10 +365,13 @@
         <div class="toolbar-group">
             <select id="frame-ratio" class="toolbar-select">
                 <option value="1:1">1:1</option>
-                <option value="4:3">4:3</option>
+                <option value="2:3">2:3</option>
+                <option value="3:2">3:2</option>
                 <option value="3:4">3:4</option>
-                <option value="16:9">16:9</option>
+                <option value="4:3">4:3</option>
                 <option value="9:16">9:16</option>
+                <option value="16:9">16:9</option>
+                <option value="custom" disabled style="color:#aaa">Custom</option>
             </select>
         </div>
         <div class="toolbar-separator"></div>
@@ -502,7 +539,71 @@
         </button>
     </aside>
 
+    <!-- Auth Modal (same as index.html) -->
+    <div class="auth-modal-overlay" id="auth-modal-overlay">
+        <div class="auth-modal" id="auth-modal">
+            <button class="auth-modal-close" id="auth-modal-close" aria-label="Close">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+            </button>
+            <div class="auth-page" id="auth-page-login">
+                <div class="auth-logo">
+                    <img src="assets/images/logo.png" alt="AI Design" class="auth-logo-icon">
+                    <span>AI Design</span>
+                </div>
+                <h2 class="auth-title">Welcome to AI Design</h2>
+                <p class="auth-subtitle">Log in or Sign up to Continue</p>
+                <div class="auth-social-btns">
+                    <button class="auth-social-btn" id="auth-google-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+                        Continue with Google
+                    </button>
+                    <button class="auth-social-btn" id="auth-apple-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+                        Continue with Apple
+                    </button>
+                </div>
+                <div class="auth-divider"></div>
+                <div class="auth-email-section">
+                    <input type="email" class="auth-email-input" id="auth-email-input" placeholder="Email Address" autocomplete="email">
+                    <button class="auth-continue-btn" id="auth-email-continue-btn">Continue with Email</button>
+                </div>
+                <p class="auth-terms">By continuing you agree to the <a href="#">Terms of Use</a> and <a href="#">Privacy Policy</a></p>
+            </div>
+            <div class="auth-page auth-page-hidden" id="auth-page-otp">
+                <button class="auth-back-btn" id="auth-back-btn" aria-label="Back">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div class="auth-logo">
+                    <img src="assets/images/logo.png" alt="AI Design" class="auth-logo-icon">
+                    <span>AI Design</span>
+                </div>
+                <h2 class="auth-title auth-title-otp">Check your email to continue</h2>
+                <p class="auth-otp-desc">We've sent a one-time password to your email.<br>Please check your inbox at<br><strong id="auth-otp-email"></strong></p>
+                <div class="auth-otp-inputs" id="auth-otp-inputs">
+                    <input class="auth-otp-digit" type="text" maxlength="1" inputmode="numeric" pattern="[0-9]">
+                    <input class="auth-otp-digit" type="text" maxlength="1" inputmode="numeric" pattern="[0-9]">
+                    <input class="auth-otp-digit" type="text" maxlength="1" inputmode="numeric" pattern="[0-9]">
+                    <input class="auth-otp-digit" type="text" maxlength="1" inputmode="numeric" pattern="[0-9]">
+                    <input class="auth-otp-digit" type="text" maxlength="1" inputmode="numeric" pattern="[0-9]">
+                    <input class="auth-otp-digit" type="text" maxlength="1" inputmode="numeric" pattern="[0-9]">
+                </div>
+                <p class="auth-resend" id="auth-resend-text">Resend in <span id="auth-countdown">60</span>s</p>
+                <button class="auth-resend-btn" id="auth-resend-btn" style="display:none;">Resend Code</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Supabase Auth SDK (shared with index page) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+    <!-- auth.local.js supplies real credentials and is gitignored.
+         A 404 on production is harmless — auth.js falls back to placeholder
+         detection and isConfigured() returns false gracefully. -->
+    <script src="auth.local.js" onerror="void 0"></script>
+    <script src="auth.js"></script>
     <script src="models.js"></script>
+    <script src="canvas-project.js"></script>
     <script src="canvas-engine.js"></script>
     <script src="canvas.js"></script>
     <script src="canvas-gen.js"></script>

@@ -5,6 +5,8 @@ let currentModelName = 'Auto';
 let uploadedImages = [];
 let savedRange = null; // Save selection range for @ insertion
 let currentLanguage = 'en'; // Language state: 'en' or 'zh'
+let isLoggedIn = false; // Auth state
+let otpCountdownTimer = null; // OTP countdown timer
 
 // Translation dictionary
 const translations = {
@@ -85,6 +87,10 @@ document.addEventListener('DOMContentLoaded', () => {
     updateLanguageButton();
     applyTranslations();
     initializeProjectCards();
+    initializeAuthModal();
+    updateRecentsVisibility();
+    updateAvatarState(null); // ensure correct initial state
+    initCrossTabAuthSync();  // react to auth changes in other tabs
 });
 
 // ==================== Event Listeners ====================
@@ -175,6 +181,46 @@ function initializeEventListeners() {
             showLanguagePicker();
         });
     }
+
+    // Header Login button (logged-out state)
+    const headerLoginBtn = document.getElementById('header-login-btn');
+    if (headerLoginBtn) {
+        headerLoginBtn.addEventListener('click', showAuthModal);
+    }
+
+    // Avatar button (logged-in state) → toggle dropdown, close lang picker
+    const avatarBtn = document.getElementById('user-avatar-btn');
+    if (avatarBtn) {
+        avatarBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            hideLanguagePicker();
+            const dropdown = document.getElementById('avatar-dropdown');
+            if (dropdown) dropdown.classList.toggle('open');
+        });
+    }
+
+    // Logout button inside dropdown
+    const logoutBtn = document.getElementById('avatar-logout-btn');
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', async () => {
+            await signOut();
+            isLoggedIn = false;
+            if (typeof ProjectManager !== 'undefined') {
+                await ProjectManager.setUserId('guest');
+            }
+            updateAvatarState(null);
+            updateRecentsVisibility();
+            initializeProjectCards(); // reload — guest sees no projects
+            const dropdown = document.getElementById('avatar-dropdown');
+            if (dropdown) dropdown.classList.remove('open');
+        });
+    }
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', () => {
+        const dropdown = document.getElementById('avatar-dropdown');
+        if (dropdown) dropdown.classList.remove('open');
+    });
 }
 
 // ==================== Input Editor ====================
@@ -218,7 +264,16 @@ function initializeInputEditor() {
             } else if (e.key === 'Escape') {
                 hideImagePicker();
             }
+            return; // picker is handling this event
         }
+
+        // Cmd/Ctrl + Enter → Send
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            handleGenerate();
+            return;
+        }
+        // Plain Enter → insert newline (default contenteditable behaviour, no override needed)
     });
 }
 
@@ -611,6 +666,11 @@ function updateSendButtonState() {
 
 // ==================== Generation ====================
 function handleGenerate() {
+    if (!isLoggedIn) {
+        showAuthModal();
+        return;
+    }
+
     const editor = document.getElementById('input-editor');
     const text = editor ? editor.textContent.trim() : '';
 
@@ -619,20 +679,107 @@ function handleGenerate() {
         return;
     }
 
-    // Open canvas in new tab
-    window.open('canvas.html', '_blank');
+    // Create a new project and store the prompt for the canvas to pick up
+    const projectId = ProjectManager.generateId();
+    localStorage.setItem('aime_autostart_' + projectId, JSON.stringify({ text, ts: Date.now() }));
+
+    // Open canvas with autoGen flag — canvas.js will create a 1:1 Frame and start generation
+    window.open('canvas.html?id=' + projectId + '&autoGen=1', '_blank');
 }
 
 // ==================== Project Cards ====================
-function initializeProjectCards() {
-    // Add click handlers to all project cards in recents section
-    const projectCards = document.querySelectorAll('.recents-grid .project-card');
-    projectCards.forEach(card => {
-        card.style.cursor = 'pointer';
-        card.addEventListener('click', () => {
-            window.open('canvas.html', '_blank');
+async function initializeProjectCards() {
+    const grid = document.getElementById('recents-grid');
+    if (!grid || typeof ProjectManager === 'undefined') return;
+
+    const projects = await ProjectManager.getAll();
+
+    if (projects.length === 0) {
+        grid.innerHTML = '<p class="no-projects-hint">Your projects will appear here.</p>';
+        return;
+    }
+
+    grid.innerHTML = '';
+    projects.forEach(project => {
+        const card = document.createElement('div');
+        card.className = 'project-card';
+        card.dataset.id = project.id;
+
+        const timeStr = typeof formatProjectTime === 'function'
+            ? formatProjectTime(project.updatedAt)
+            : new Date(project.updatedAt).toLocaleDateString();
+
+        const thumbHtml = project.thumbnail
+            ? `<img src="${project.thumbnail}" alt="${escapeHtml(project.name)}" loading="lazy" decoding="async">`
+            : `<div class="project-thumb-empty"></div>`;
+
+        card.innerHTML = `
+            <div class="project-thumb">${thumbHtml}</div>
+            <div class="project-info">
+                <h3 class="project-card-name" title="Click to rename">${escapeHtml(project.name || 'Untitled Project')}</h3>
+                <p>${timeStr}</p>
+            </div>
+            <button class="project-delete-btn" title="Delete project" aria-label="Delete">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                </svg>
+            </button>`;
+
+        // Open project on click (but not on name or delete btn clicks)
+        card.addEventListener('click', (e) => {
+            if (e.target.closest('.project-delete-btn') || e.target.closest('.project-card-name')) return;
+            window.open('canvas.html?id=' + project.id, '_blank');
         });
+
+        // Inline name editing
+        const nameEl = card.querySelector('.project-card-name');
+        nameEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'project-name-input';
+            input.value = project.name || 'Untitled Project';
+            nameEl.replaceWith(input);
+            input.focus();
+            input.select();
+
+            async function commitRename() {
+                const newName = input.value.trim() || 'Untitled Project';
+                await ProjectManager.rename(project.id, newName);
+                initializeProjectCards();
+            }
+
+            input.addEventListener('blur', commitRename);
+            input.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+                if (ev.key === 'Escape') {
+                    input.value = project.name || 'Untitled Project';
+                    input.blur();
+                }
+            });
+        });
+
+        // Delete on hover button
+        const deleteBtn = card.querySelector('.project-delete-btn');
+        deleteBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (confirm(`Delete "${project.name || 'Untitled Project'}"? This cannot be undone.`)) {
+                await ProjectManager.delete(project.id);
+                initializeProjectCards();
+            }
+        });
+
+        grid.appendChild(card);
     });
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 }
 
 
@@ -704,6 +851,10 @@ function showNotification(message) {
 
 // ==================== Language Picker ====================
 function showLanguagePicker() {
+    // Mutually exclusive: close avatar dropdown
+    const avatarDd = document.getElementById('avatar-dropdown');
+    if (avatarDd) avatarDd.classList.remove('open');
+
     let picker = document.getElementById('language-picker');
 
     if (!picker) {
@@ -826,6 +977,435 @@ function updateLanguageButton() {
     // Update button to show full language name
     const langText = currentLanguage === 'en' ? 'English' : '简体中文';
     languageDisplay.textContent = langText;
+}
+
+// ==================== Auth Modal ====================
+function initializeAuthModal() {
+    const overlay = document.getElementById('auth-modal-overlay');
+    const closeBtn = document.getElementById('auth-modal-close');
+    const backBtn = document.getElementById('auth-back-btn');
+    const googleBtn = document.getElementById('auth-google-btn');
+    const appleBtn = document.getElementById('auth-apple-btn');
+    const emailContinueBtn = document.getElementById('auth-email-continue-btn');
+    const emailInput = document.getElementById('auth-email-input');
+    const resendBtn = document.getElementById('auth-resend-btn');
+
+    // Listen for real auth state changes (e.g. after OAuth redirect)
+    if (typeof onAuthStateChange === 'function') {
+        onAuthStateChange(({ loggedIn, user }) => {
+            if (loggedIn) {
+                completeLogin(user);
+            }
+        });
+    }
+
+    // Close on overlay click
+    if (overlay) {
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) hideAuthModal();
+        });
+    }
+
+    // Close button
+    if (closeBtn) {
+        closeBtn.addEventListener('click', hideAuthModal);
+    }
+
+    // Back button (OTP → Login)
+    if (backBtn) {
+        backBtn.addEventListener('click', () => {
+            showAuthPage('login');
+            clearOtpCountdown();
+        });
+    }
+
+    // Google login
+    if (googleBtn) {
+        googleBtn.addEventListener('click', async () => {
+            setAuthLoading(googleBtn, true);
+            const { error } = await signInWithGoogle();
+            if (error) {
+                if (error.message === 'not_configured') {
+                    // Dev mode: simulate login
+                    completeLogin({ email: 'demo@example.com', provider: 'google' });
+                } else {
+                    showAuthError(error.message || 'Google 登录失败，请重试');
+                }
+            }
+            setAuthLoading(googleBtn, false);
+        });
+    }
+
+    // Apple login
+    if (appleBtn) {
+        appleBtn.addEventListener('click', async () => {
+            setAuthLoading(appleBtn, true);
+            const { error } = await signInWithApple();
+            if (error) {
+                if (error.message === 'not_configured') {
+                    completeLogin({ email: 'demo@example.com', provider: 'apple' });
+                } else {
+                    showAuthError(error.message || 'Apple 登录失败，请重试');
+                }
+            }
+            setAuthLoading(appleBtn, false);
+        });
+    }
+
+    // Email continue
+    if (emailContinueBtn) {
+        emailContinueBtn.addEventListener('click', async () => {
+            const email = emailInput ? emailInput.value.trim() : '';
+            if (!email || !isValidEmail(email)) {
+                if (emailInput) {
+                    emailInput.focus();
+                    emailInput.style.borderColor = '#E53E3E';
+                    setTimeout(() => { emailInput.style.borderColor = ''; }, 1500);
+                }
+                return;
+            }
+
+            setAuthLoading(emailContinueBtn, true);
+            const { error, simulated } = await sendEmailOTP(email);
+            setAuthLoading(emailContinueBtn, false);
+
+            if (error) {
+                showAuthError(error.message || '发送失败，请检查邮箱地址');
+                return;
+            }
+
+            // Store email for OTP verification
+            emailContinueBtn.dataset.pendingEmail = email;
+            showOtpPage(email, simulated);
+        });
+    }
+
+    // Email input enter key
+    if (emailInput) {
+        emailInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') emailContinueBtn && emailContinueBtn.click();
+        });
+        emailInput.addEventListener('input', () => {
+            emailInput.style.borderColor = '';
+            const errorEl = document.getElementById('auth-error-msg');
+            if (errorEl) errorEl.remove();
+        });
+    }
+
+    // Resend button
+    if (resendBtn) {
+        resendBtn.addEventListener('click', async () => {
+            const emailContinueBtn = document.getElementById('auth-email-continue-btn');
+            const email = emailContinueBtn ? emailContinueBtn.dataset.pendingEmail : '';
+            if (email) {
+                resendBtn.disabled = true;
+                await sendEmailOTP(email);
+                resendBtn.disabled = false;
+            }
+            startOtpCountdown();
+            resendBtn.style.display = 'none';
+            document.getElementById('auth-resend-text').style.display = '';
+        });
+    }
+
+    // OTP digit inputs
+    initializeOtpInputs();
+
+    // Escape key close
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const overlay = document.getElementById('auth-modal-overlay');
+            if (overlay && overlay.classList.contains('active')) {
+                hideAuthModal();
+            }
+        }
+    });
+}
+
+function showAuthModal() {
+    const overlay = document.getElementById('auth-modal-overlay');
+    if (!overlay) return;
+    showAuthPage('login');
+    overlay.classList.add('active');
+    // Focus email input
+    setTimeout(() => {
+        const emailInput = document.getElementById('auth-email-input');
+        if (emailInput) emailInput.focus();
+    }, 250);
+}
+
+function hideAuthModal() {
+    const overlay = document.getElementById('auth-modal-overlay');
+    if (overlay) overlay.classList.remove('active');
+    clearOtpCountdown();
+    // Reset email input
+    const emailInput = document.getElementById('auth-email-input');
+    if (emailInput) emailInput.value = '';
+    // Clear OTP digits
+    document.querySelectorAll('.auth-otp-digit').forEach(inp => {
+        inp.value = '';
+        inp.classList.remove('filled');
+    });
+}
+
+function showAuthPage(page) {
+    const loginPage = document.getElementById('auth-page-login');
+    const otpPage = document.getElementById('auth-page-otp');
+    if (page === 'login') {
+        loginPage && loginPage.classList.remove('auth-page-hidden');
+        otpPage && otpPage.classList.add('auth-page-hidden');
+    } else {
+        loginPage && loginPage.classList.add('auth-page-hidden');
+        otpPage && otpPage.classList.remove('auth-page-hidden');
+    }
+}
+
+function showOtpPage(email, simulated = false) {
+    const otpEmail = document.getElementById('auth-otp-email');
+    if (otpEmail) otpEmail.textContent = email;
+
+    // Store pending email on OTP page for verification
+    const otpPage = document.getElementById('auth-page-otp');
+    if (otpPage) otpPage.dataset.pendingEmail = email;
+
+    showAuthPage('otp');
+
+    // Show simulated mode hint in dev
+    if (simulated) {
+        const desc = document.querySelector('.auth-otp-desc');
+        if (desc && !desc.querySelector('.dev-hint')) {
+            const hint = document.createElement('span');
+            hint.className = 'dev-hint';
+            hint.style.cssText = 'display:block;margin-top:8px;font-size:11px;color:#F59E0B;background:rgba(245,158,11,0.1);padding:4px 8px;border-radius:6px;';
+            hint.textContent = '⚠️  Dev 模式：输入任意6位数字即可通过验证';
+            desc.appendChild(hint);
+        }
+    }
+
+    startOtpCountdown();
+    // Clear previous inputs
+    document.querySelectorAll('.auth-otp-digit').forEach(inp => {
+        inp.value = '';
+        inp.classList.remove('filled', 'error');
+    });
+    // Focus first input
+    setTimeout(() => {
+        const first = document.querySelector('.auth-otp-digit');
+        if (first) first.focus();
+    }, 100);
+}
+
+function startOtpCountdown() {
+    clearOtpCountdown();
+    let seconds = 60;
+    const countdownEl = document.getElementById('auth-countdown');
+    const resendText = document.getElementById('auth-resend-text');
+    const resendBtn = document.getElementById('auth-resend-btn');
+    if (countdownEl) countdownEl.textContent = seconds;
+    if (resendText) resendText.style.display = '';
+    if (resendBtn) resendBtn.style.display = 'none';
+
+    otpCountdownTimer = setInterval(() => {
+        seconds--;
+        if (countdownEl) countdownEl.textContent = seconds;
+        if (seconds <= 0) {
+            clearOtpCountdown();
+            if (resendText) resendText.style.display = 'none';
+            if (resendBtn) resendBtn.style.display = 'block';
+        }
+    }, 1000);
+}
+
+function clearOtpCountdown() {
+    if (otpCountdownTimer) {
+        clearInterval(otpCountdownTimer);
+        otpCountdownTimer = null;
+    }
+}
+
+function initializeOtpInputs() {
+    const inputs = document.querySelectorAll('.auth-otp-digit');
+    inputs.forEach((input, index) => {
+        input.addEventListener('input', (e) => {
+            const val = e.target.value.replace(/\D/g, '');
+            e.target.value = val ? val[0] : '';
+            if (val) {
+                e.target.classList.add('filled');
+                if (index < inputs.length - 1) {
+                    inputs[index + 1].focus();
+                } else {
+                    // All filled - auto verify
+                    checkOtpComplete(inputs);
+                }
+            } else {
+                e.target.classList.remove('filled');
+            }
+        });
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Backspace' && !e.target.value && index > 0) {
+                inputs[index - 1].focus();
+                inputs[index - 1].value = '';
+                inputs[index - 1].classList.remove('filled');
+            }
+        });
+
+        input.addEventListener('paste', (e) => {
+            e.preventDefault();
+            const pasted = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '');
+            pasted.split('').forEach((char, i) => {
+                if (index + i < inputs.length) {
+                    inputs[index + i].value = char;
+                    inputs[index + i].classList.add('filled');
+                }
+            });
+            const nextIndex = Math.min(index + pasted.length, inputs.length - 1);
+            inputs[nextIndex].focus();
+            checkOtpComplete(inputs);
+        });
+    });
+}
+
+async function checkOtpComplete(inputs) {
+    const code = Array.from(inputs).map(i => i.value).join('');
+    if (code.length !== 6) return;
+
+    const otpPage = document.getElementById('auth-page-otp');
+    const email = otpPage ? otpPage.dataset.pendingEmail : '';
+    if (!email) return;
+
+    // Show loading state on inputs
+    inputs.forEach(inp => { inp.disabled = true; });
+
+    const { data, error, simulated } = await verifyEmailOTP(email, code);
+
+    inputs.forEach(inp => { inp.disabled = false; });
+
+    if (error) {
+        // Shake + highlight error
+        inputs.forEach(inp => inp.classList.add('error'));
+        setTimeout(() => inputs.forEach(inp => inp.classList.remove('error')), 600);
+        showAuthError(error.message || '验证码错误，请重新输入');
+        // Clear inputs and refocus
+        inputs.forEach(inp => { inp.value = ''; inp.classList.remove('filled'); });
+        inputs[0].focus();
+        return;
+    }
+
+    const user = data?.user || { email };
+    completeLogin(user);
+}
+
+async function completeLogin(user = null) {
+    isLoggedIn = true;
+    const userId = user?.id || 'authenticated';
+    if (typeof ProjectManager !== 'undefined') {
+        await ProjectManager.setUserId(userId);
+    }
+    hideAuthModal();
+    updateRecentsVisibility();
+    updateAvatarState(user);
+    initializeProjectCards();
+}
+
+function updateAvatarState(user = null) {
+    const loginBtn = document.getElementById('header-login-btn');
+    const avatarWrapper = document.getElementById('avatar-wrapper');
+    const avatarImg = document.getElementById('user-avatar-img');
+    const dropdownAvatarImg = document.getElementById('dropdown-avatar-img');
+    const dropdownEmail = document.getElementById('dropdown-user-email');
+
+    if (isLoggedIn) {
+        if (loginBtn) loginBtn.style.display = 'none';
+        if (avatarWrapper) avatarWrapper.style.display = '';
+
+        // Use provider avatar if available
+        const avatarUrl = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
+        const email = user?.email || '';
+        if (avatarUrl) {
+            if (avatarImg) { avatarImg.src = avatarUrl; avatarImg.alt = email; }
+            if (dropdownAvatarImg) { dropdownAvatarImg.src = avatarUrl; dropdownAvatarImg.alt = email; }
+        }
+        if (dropdownEmail) dropdownEmail.textContent = email;
+    } else {
+        if (loginBtn) loginBtn.style.display = '';
+        if (avatarWrapper) avatarWrapper.style.display = 'none';
+    }
+}
+
+function setAuthLoading(btn, loading) {
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.style.opacity = loading ? '0.7' : '';
+    btn.style.cursor = loading ? 'wait' : '';
+}
+
+function showAuthError(message) {
+    // Remove old error
+    const old = document.getElementById('auth-error-msg');
+    if (old) old.remove();
+
+    const activePageId = document.getElementById('auth-page-otp').classList.contains('auth-page-hidden')
+        ? 'auth-page-login' : 'auth-page-otp';
+    const page = document.getElementById(activePageId);
+    if (!page) return;
+
+    const err = document.createElement('p');
+    err.id = 'auth-error-msg';
+    err.style.cssText = 'color:#E53E3E;font-size:13px;text-align:center;margin-top:8px;animation:fadeIn 0.2s ease;';
+    err.textContent = message;
+    page.appendChild(err);
+    setTimeout(() => err.remove(), 4000);
+}
+
+function updateRecentsVisibility() {
+    const recentsGrid = document.getElementById('recents-grid');
+    if (!recentsGrid) return;
+    if (isLoggedIn) {
+        recentsGrid.style.display = '';
+        const placeholder = document.getElementById('recents-placeholder');
+        if (placeholder) placeholder.style.display = 'none';
+    } else {
+        recentsGrid.style.display = 'none';
+        const placeholder = document.getElementById('recents-placeholder');
+        if (placeholder) placeholder.style.display = 'flex';
+    }
+}
+
+function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// ==================== Cross-tab Auth Sync ====================
+function initCrossTabAuthSync() {
+    if (typeof listenForAuthBroadcast !== 'function') return;
+
+    listenForAuthBroadcast(({ event, userId, userEmail }) => {
+        if (event === 'SIGNED_IN') {
+            if (!isLoggedIn) {
+                window.location.reload();
+            } else if (typeof ProjectManager !== 'undefined' &&
+                       ProjectManager.getUserId() !== userId) {
+                ProjectManager.setUserId(userId || 'authenticated').then(() => {
+                    updateRecentsVisibility();
+                    initializeProjectCards();
+                    showNotification('Account changed — projects updated');
+                });
+            }
+        } else if (event === 'SIGNED_OUT') {
+            if (isLoggedIn) {
+                isLoggedIn = false;
+                if (typeof ProjectManager !== 'undefined') {
+                    ProjectManager.setUserId('guest').then(() => {
+                        updateAvatarState(null);
+                        updateRecentsVisibility();
+                        initializeProjectCards();
+                        showNotification('Signed out from another tab');
+                    });
+                }
+            }
+        }
+    });
 }
 
 // ==================== Recents Horizontal Scroll ====================
