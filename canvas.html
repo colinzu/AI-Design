@@ -597,10 +597,6 @@
 
     <!-- Supabase Auth SDK (shared with index page) -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-    <!-- auth.local.js supplies real credentials and is gitignored.
-         A 404 on production is harmless — auth.js falls back to placeholder
-         detection and isConfigured() returns false gracefully. -->
-    <script src="auth.local.js" onerror="void 0"></script>
     <script src="auth.js"></script>
     <script src="models.js"></script>
     <script src="canvas-project.js"></script>

@@ -5,25 +5,12 @@
 //   3. Authentication → Providers → enable Email (OTP)
 //   4. Authentication → Providers → enable Google (need Google Cloud Client ID)
 //   5. Authentication → Providers → enable Apple (need Apple Developer account)
-//   6. Copy auth.local.js.example → auth.local.js and fill in your keys
-//      (auth.local.js is gitignored and loaded before this file in HTML)
+//
+// Note: Supabase anon keys are safe to commit — they are public-facing by design
+//       and only have access controlled by Row Level Security (RLS) policies.
 
-// These are placeholder values. Real credentials are supplied by auth.local.js
-// which is loaded first in the HTML and is NOT committed to git.
-// If auth.local.js has already defined these as real values, the declarations
-// below are intentionally shadowed / overridden by it (auth.local.js uses
-// plain `const` at the top level of the same scope via a preceding <script>).
-// To avoid redeclaration errors, we use var here so re-declaration is silently
-// ignored when auth.local.js has already run.
-
-/* eslint-disable no-var */
-if (typeof SUPABASE_URL === 'undefined') {
-    var SUPABASE_URL = 'YOUR_SUPABASE_PROJECT_URL';
-}
-if (typeof SUPABASE_ANON_KEY === 'undefined') {
-    var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
-}
-/* eslint-enable no-var */
+const SUPABASE_URL = 'https://lfluatmojhkzdywizmsm.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxmbHVhdG1vamhremR5d2l6bXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE0MzM1NDksImV4cCI6MjA4NzAwOTU0OX0.ivjN5x7ZNU8RXsTBLuA_oxBKHCPcRxStagyRAwrgy9w';
 
 // ==================== Supabase Client ====================
 let _supabase = null;
