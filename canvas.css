@@ -286,13 +286,17 @@ body.canvas-mode {
 .tool-btn svg {
     width: 20px;
     height: 20px;
+    color: #073247;
+    opacity: 0.6;
+    transition: all 0.2s;
 }
 
 .tool-btn:hover {
     background: rgba(7, 50, 71, 0.06);
 }
 
-.tool-btn:hover img {
+.tool-btn:hover img,
+.tool-btn:hover svg {
     opacity: 1;
 }
 
@@ -303,6 +307,11 @@ body.canvas-mode {
 .tool-btn.active img {
     opacity: 1;
     filter: brightness(0) invert(1);
+}
+
+.tool-btn.active svg {
+    opacity: 1;
+    color: #ffffff;
 }
 
 /* Hover tooltip for bottom toolbar */
@@ -332,6 +341,11 @@ body.canvas-mode {
     gap: 20px;
     /* 20px gap between name and shortcut */
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.tool-btn:hover .tooltip-popup {
+    opacity: 1;
+    visibility: visible;
 }
 
 
@@ -1004,6 +1018,33 @@ body.canvas-mode {
     transform: scale(1.05);
 }
 
+/* Floating Cancel link shown inside generating frames */
+.gen-cancel-overlay {
+    position: fixed;
+    transform: translateX(-50%);
+    z-index: 9999;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(7, 50, 71, 0.65);
+    background: rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(7, 50, 71, 0.1);
+    border-radius: 20px;
+    padding: 4px 14px;
+    cursor: pointer;
+    user-select: none;
+    pointer-events: auto;
+    transition: color 0.15s, background 0.15s;
+    white-space: nowrap;
+    letter-spacing: 0.01em;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.gen-cancel-overlay:hover {
+    color: rgba(7, 50, 71, 1);
+    background: rgba(255, 255, 255, 0.98);
+}
+
 .gen-sparkle {
     flex-shrink: 0;
 }
@@ -1131,6 +1172,28 @@ body.canvas-mode {
     font-weight: 500;
     color: #073247;
     line-height: 18px;
+}
+
+/* Chip hover preview - magnified thumbnail */
+.gen-chip-preview {
+    position: fixed;
+    z-index: 10001;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.98);
+    border: 1px solid rgba(7, 50, 71, 0.12);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+    pointer-events: none;
+}
+
+.gen-chip-preview img {
+    display: block;
+    max-width: 320px;
+    max-height: 240px;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 4px;
 }
 
 /* Footer */

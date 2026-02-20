@@ -51,8 +51,8 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             engine.elements = project.elements;
             if (project.viewport) {
-                engine.viewport.x     = project.viewport.x;
-                engine.viewport.y     = project.viewport.y;
+                engine.viewport.x = project.viewport.x;
+                engine.viewport.y = project.viewport.y;
                 engine.viewport.scale = project.viewport.scale;
             }
             if (projectNameInput && project.name) {
@@ -71,7 +71,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const user = await getCurrentUser();
                 if (user?.id) await ProjectManager.setUserId(user.id);
-            } catch {}
+            } catch { }
         }
         await initProject();
 
@@ -243,8 +243,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 recentSubmenu.innerHTML = projects.map(p => `
                     <div class="recent-submenu-item" data-id="${p.id}">
                         ${p.thumbnail
-                            ? `<img class="recent-submenu-thumb" src="${p.thumbnail}" alt="">`
-                            : `<div class="recent-submenu-thumb recent-submenu-thumb-empty"></div>`}
+                        ? `<img class="recent-submenu-thumb" src="${p.thumbnail}" alt="">`
+                        : `<div class="recent-submenu-thumb recent-submenu-thumb-empty"></div>`}
                         <span class="recent-submenu-name">${escapeHtml(p.name || 'Untitled Project')}</span>
                     </div>
                 `).join('');
@@ -463,6 +463,45 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // ==================== Shape Button Icon Memory ====================
+    // Inline SVG icons — stroke-only so they render correctly at toolbar size
+    const SHAPE_ICONS = {
+        rectangle: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="14" height="14" rx="1.5" stroke="currentColor" stroke-width="1.7"/></svg>`,
+        ellipse: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><ellipse cx="10" cy="10" rx="7" ry="7" stroke="currentColor" stroke-width="1.7"/></svg>`,
+        triangle: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 3L17.5 16.5H2.5L10 3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>`,
+        star: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 2.5l1.8 4.8 5 .4-3.8 3.3 1.2 4.9L10 13.4l-4.2 2.5 1.2-4.9L3.2 7.7l5-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
+        line: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="3.5" y1="16.5" x2="16.5" y2="3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
+    };
+
+    // Restore last-used shape from localStorage
+    const SHAPE_STORAGE_KEY = 'canvas_last_shape';
+    const savedShape = localStorage.getItem(SHAPE_STORAGE_KEY) || 'rectangle';
+    const rectangleBtn = document.querySelector('.tool-btn[data-tool="rectangle"]');
+
+    function applyShapeToButton(shapeType) {
+        if (!rectangleBtn) return;
+        // Preserve the tooltip popup if already present
+        const existingTooltip = rectangleBtn.querySelector('.tooltip-popup');
+        if (existingTooltip) existingTooltip.remove();
+
+        const icon = SHAPE_ICONS[shapeType] || SHAPE_ICONS.rectangle;
+        rectangleBtn.innerHTML = icon;
+
+        // Re-append or create the tooltip
+        if (existingTooltip) {
+            rectangleBtn.appendChild(existingTooltip);
+        }
+        // If no tooltip yet (e.g. called before tooltip init), it will be added by the tooltip init loop
+    }
+
+    // Apply saved shape on load — defer until after tooltip init runs
+    window._applyInitialShape = () => {
+        if (savedShape !== 'rectangle') {
+            engine.setShapeType(savedShape);
+            applyShapeToButton(savedShape);
+        }
+    };
+
     // Shape Menu
     if (shapeMenu) {
         shapeMenu.addEventListener('click', (e) => {
@@ -477,12 +516,15 @@ document.addEventListener('DOMContentLoaded', () => {
             // Activate rectangle tool
             engine.setTool('rectangle');
 
+            // Update button icon to reflect chosen shape
+            applyShapeToButton(shapeType);
+
+            // Persist selection
+            localStorage.setItem(SHAPE_STORAGE_KEY, shapeType);
+
             // Update active state
             toolButtons.forEach(b => b.classList.remove('active'));
-            const rectangleBtn = document.querySelector('.tool-btn[data-tool="rectangle"]');
-            if (rectangleBtn) {
-                rectangleBtn.classList.add('active');
-            }
+            if (rectangleBtn) rectangleBtn.classList.add('active');
 
             // Hide menu
             shapeMenu.classList.add('hidden');
@@ -548,6 +590,16 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        // Tab: open & focus the gen-panel input when elements are selected
+        if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey &&
+            !engine.editingText && !engine.isInputActive()) {
+            if (engine.selectedElements && engine.selectedElements.length > 0) {
+                e.preventDefault();
+                // Delegate to canvas-gen: expand the active panel and focus editor
+                if (window.canvasGenFocusPanel) window.canvasGenFocusPanel();
+            }
+        }
+
         // Zoom shortcuts (Shift + key, use e.code for reliable detection)
         if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
             !engine.editingText && !engine.isInputActive()) {
@@ -579,6 +631,25 @@ document.addEventListener('DOMContentLoaded', () => {
     // Make engine globally accessible for debugging
     window.canvasEngine = engine;
 
+    // ==================== Global Wheel Interception (prevents browser zoom everywhere) ====================
+    // Block Ctrl/Cmd + wheel from zooming the browser, regardless of which element the cursor is over.
+    // Skip if event is on canvas itself — canvas-engine.js handleWheel already handles it there.
+    document.addEventListener('wheel', (e) => {
+        if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            const canvasEl = document.getElementById('infinite-canvas');
+            // If cursor is on the canvas, canvas-engine.js already handles zoom — skip
+            if (canvasEl && (e.target === canvasEl || canvasEl.contains(e.target))) return;
+            if (window.canvasEngine) {
+                // Zoom around canvas center when cursor is over UI elements
+                const rect = canvasEl ? canvasEl.getBoundingClientRect() : null;
+                const cx = rect ? rect.width / 2 : window.innerWidth / 2;
+                const cy = rect ? rect.height / 2 : window.innerHeight / 2;
+                window.canvasEngine.zoom(-e.deltaY, cx, cy, e.deltaY);
+            }
+        }
+    }, { passive: false });
+
     // Initialize custom tooltips
     document.querySelectorAll('.tool-btn').forEach(btn => {
         const tooltipText = btn.getAttribute('data-tooltip');
@@ -602,6 +673,9 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.appendChild(tooltip);
         }
     });
+
+    // Apply saved shape icon now that tooltips are set up
+    if (window._applyInitialShape) window._applyInitialShape();
 
     // ==================== Floating Action Bar Logic ====================
     const actionBar = document.getElementById('frame-action-bar');
@@ -627,13 +701,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Update ratio select
                 const currentRatio = frame.width / frame.height;
                 const RATIO_MAP = [
-                    { value: '1:1',  ratio: 1 },
-                    { value: '2:3',  ratio: 2/3 },
-                    { value: '3:2',  ratio: 3/2 },
-                    { value: '3:4',  ratio: 3/4 },
-                    { value: '4:3',  ratio: 4/3 },
-                    { value: '9:16', ratio: 9/16 },
-                    { value: '16:9', ratio: 16/9 },
+                    { value: '1:1', ratio: 1 },
+                    { value: '2:3', ratio: 2 / 3 },
+                    { value: '3:2', ratio: 3 / 2 },
+                    { value: '3:4', ratio: 3 / 4 },
+                    { value: '4:3', ratio: 4 / 3 },
+                    { value: '9:16', ratio: 9 / 16 },
+                    { value: '16:9', ratio: 16 / 9 },
                 ];
                 const matched = RATIO_MAP.find(r => Math.abs(currentRatio - r.ratio) < 0.02);
                 ratioSelect.value = matched ? matched.value : 'custom';
@@ -683,11 +757,40 @@ document.addEventListener('DOMContentLoaded', () => {
             const val = e.target.value;
             if (val === 'custom') return;
 
-            const [w, h] = val.split(':').map(Number);
-            const ratio = w / h;
+            const [rW, rH] = val.split(':').map(Number);
+            const ratio = rW / rH;
 
-            // Adjust height to match ratio while keeping width
-            frame.height = frame.width / ratio;
+            // Keep the shorter side at least 1080 (default)
+            // For landscape (ratio>=1): width is longer, shorter is height = 1080
+            // For portrait  (ratio<1):  height is longer, shorter is width  = 1080
+            const minSide = 1080;
+            let newW, newH;
+            if (ratio >= 1) {
+                newH = minSide;
+                newW = Math.round(minSide * ratio);
+            } else {
+                newW = minSide;
+                newH = Math.round(minSide / ratio);
+            }
+
+            frame.width = newW;
+            frame.height = newH;
+
+            // Also resize all child images to fill the frame proportionally
+            engine.elements.forEach(el => {
+                if (el.parentFrame !== frame || el.type !== 'image') return;
+                const frameAspect = newW / newH;
+                const imgAspect = (el.image?.naturalWidth || el.width) / (el.image?.naturalHeight || el.height);
+                if (imgAspect > frameAspect) {
+                    el.height = newH;
+                    el.width = newH * imgAspect;
+                } else {
+                    el.width = newW;
+                    el.height = newW / imgAspect;
+                }
+                el.x = frame.x + (newW - el.width) / 2;
+                el.y = frame.y + (newH - el.height) / 2;
+            });
 
             engine.render();
             engine.saveState();
@@ -715,85 +818,85 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
 
-        // Handle Download
+        // Handle Download — export at actual image resolution when frame has an image
         downloadBtn.addEventListener('click', () => {
             const frame = engine.selectedElements[0];
             if (!frame || frame.type !== 'frame') return;
 
-            // 1. Create a temporary canvas
+            const frameImage = engine.elements.find(el => el.type === 'image' && el.parentFrame === frame && el.image);
+            const outW = frameImage?.image?.naturalWidth
+                ? frameImage.image.naturalWidth
+                : Math.max(1, Math.round(frame.width));
+            const outH = frameImage?.image?.naturalHeight
+                ? frameImage.image.naturalHeight
+                : Math.max(1, Math.round(frame.height));
+
             const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = frame.width;
-            tempCanvas.height = frame.height;
+            tempCanvas.width = outW;
+            tempCanvas.height = outH;
             const tempCtx = tempCanvas.getContext('2d');
+            const scaleX = outW / frame.width;
+            const scaleY = outH / frame.height;
 
-            // 2. Fill background
             tempCtx.fillStyle = frame.fill;
-            tempCtx.fillRect(0, 0, frame.width, frame.height);
+            tempCtx.fillRect(0, 0, outW, outH);
 
-            // 3. Render overlapping elements
-            // We need to shift everything by (-frame.x, -frame.y)
             engine.elements.forEach(el => {
                 if (el === frame) return;
+                if (el.x >= frame.x + frame.width || el.x + (el.width || 0) <= frame.x ||
+                    el.y >= frame.y + frame.height || el.y + (el.height || 0) <= frame.y) return;
 
-                // Simple intersection check
-                if (el.x < frame.x + frame.width &&
-                    el.x + el.width > frame.x &&
-                    el.y < frame.y + frame.height &&
-                    el.y + el.height > frame.y) {
+                const localX = el.x - frame.x;
+                const localY = el.y - frame.y;
+                const sw = (el.width || 0) * scaleX;
+                const sh = (el.height || 0) * scaleY;
+                const sx = localX * scaleX;
+                const sy = localY * scaleY;
 
-                    // Save and translate context to draw in local frame coordinates
-                    // Since we can't easily reuse renderElement with a custom context/transform without deeper refactoring,
-                    // we'll implement a basic subset of rendering here for the export.
+                tempCtx.save();
 
-                    const localX = el.x - frame.x;
-                    const localY = el.y - frame.y;
-
-                    tempCtx.save();
-
-                    if (el.type === 'image' && el.image) {
-                        tempCtx.drawImage(el.image, localX, localY, el.width, el.height);
-                    } else if (el.type === 'text') {
-                        tempCtx.font = `${el.fontSize}px ${el.fontFamily}`;
-                        tempCtx.fillStyle = el.color;
-                        tempCtx.textAlign = el.align || 'left';
-                        tempCtx.textBaseline = 'top';
-                        const lines = el.text.split('\n');
-                        const lineHeight = el.fontSize * 1.2;
-                        lines.forEach((line, i) => {
-                            tempCtx.fillText(line, localX + 5, localY + 5 + i * lineHeight);
-                        });
-                    } else if (el.type === 'shape') {
-                        tempCtx.beginPath();
-                        if (el.shapeType === 'rectangle') {
-                            if (el.cornerRadius) {
-                                // Simple round rect
-                                tempCtx.roundRect(localX, localY, el.width, el.height, el.cornerRadius);
-                            } else {
-                                tempCtx.rect(localX, localY, el.width, el.height);
-                            }
-                        } else if (el.shapeType === 'ellipse') {
-                            tempCtx.ellipse(localX + el.width / 2, localY + el.height / 2, el.width / 2, el.height / 2, 0, 0, Math.PI * 2);
-                        } else if (el.shapeType === 'line') {
-                            tempCtx.moveTo(localX, localY);
-                            tempCtx.lineTo(el.x2 - frame.x, el.y2 - frame.y);
-                        }
-
-                        if (el.fill && el.fill !== 'none') {
-                            tempCtx.fillStyle = el.fill;
-                            tempCtx.fill();
-                        }
-                        if (el.stroke && el.strokeWidth > 0) {
-                            tempCtx.strokeStyle = el.stroke;
-                            tempCtx.lineWidth = el.strokeWidth;
-                            tempCtx.stroke();
-                        }
+                if (el.type === 'image' && el.image) {
+                    if (el === frameImage && el.image.naturalWidth === outW && el.image.naturalHeight === outH) {
+                        tempCtx.drawImage(el.image, 0, 0, outW, outH);
+                    } else {
+                        tempCtx.drawImage(el.image, 0, 0, el.image.naturalWidth, el.image.naturalHeight, sx, sy, sw, sh);
                     }
-
-                    tempCtx.restore();
+                } else if (el.type === 'text') {
+                    tempCtx.font = `${(el.fontSize || 14) * scaleY}px ${el.fontFamily || 'Inter'}`;
+                    tempCtx.fillStyle = el.color || '#000';
+                    tempCtx.textAlign = el.align || 'left';
+                    tempCtx.textBaseline = 'top';
+                    const lines = (el.text || '').split('\n');
+                    const lineHeight = (el.fontSize || 14) * 1.2 * scaleY;
+                    lines.forEach((line, i) => {
+                        tempCtx.fillText(line, sx + 5 * scaleX, sy + 5 * scaleY + i * lineHeight);
+                    });
+                } else if (el.type === 'shape') {
+                    tempCtx.beginPath();
+                    if (el.shapeType === 'rectangle') {
+                        const r = (el.cornerRadius || 0) * Math.min(scaleX, scaleY);
+                        if (r) tempCtx.roundRect(sx, sy, sw, sh, r);
+                        else tempCtx.rect(sx, sy, sw, sh);
+                    } else if (el.shapeType === 'ellipse') {
+                        tempCtx.ellipse(sx + sw / 2, sy + sh / 2, sw / 2, sh / 2, 0, 0, Math.PI * 2);
+                    } else if (el.shapeType === 'line') {
+                        tempCtx.moveTo(sx, sy);
+                        tempCtx.lineTo((el.x2 - frame.x) * scaleX, (el.y2 - frame.y) * scaleY);
+                    }
+                    if (el.fill && el.fill !== 'none') {
+                        tempCtx.fillStyle = el.fill;
+                        tempCtx.fill();
+                    }
+                    if (el.stroke && el.strokeWidth > 0) {
+                        tempCtx.strokeStyle = el.stroke;
+                        tempCtx.lineWidth = el.strokeWidth * Math.min(scaleX, scaleY);
+                        tempCtx.stroke();
+                    }
                 }
+
+                tempCtx.restore();
             });
 
-            // 4. Download
             const link = document.createElement('a');
             link.download = `${frame.name || 'frame'}.png`;
             link.href = tempCanvas.toDataURL('image/png');
@@ -805,23 +908,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Use the same element IDs as index.html so the header is identical
     function updateCanvasAuthUI(loggedIn, user) {
-        const loginBtn   = document.getElementById('header-login-btn');
+        const loginBtn = document.getElementById('header-login-btn');
         const avatarWrap = document.getElementById('avatar-wrapper');
-        const avatarImg  = document.getElementById('user-avatar-img');
+        const avatarImg = document.getElementById('user-avatar-img');
         const dropAvatar = document.getElementById('dropdown-avatar-img');
-        const dropEmail  = document.getElementById('dropdown-user-email');
+        const dropEmail = document.getElementById('dropdown-user-email');
 
         if (loggedIn) {
-            if (loginBtn)   loginBtn.style.display   = 'none';
+            if (loginBtn) loginBtn.style.display = 'none';
             if (avatarWrap) avatarWrap.style.display = '';
             const url = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
             if (url) {
-                if (avatarImg)  { avatarImg.src  = url; avatarImg.alt  = user.email || ''; }
+                if (avatarImg) { avatarImg.src = url; avatarImg.alt = user.email || ''; }
                 if (dropAvatar) { dropAvatar.src = url; dropAvatar.alt = user.email || ''; }
             }
             if (dropEmail) dropEmail.textContent = user?.email || '';
         } else {
-            if (loginBtn)   loginBtn.style.display   = '';
+            if (loginBtn) loginBtn.style.display = '';
             if (avatarWrap) avatarWrap.style.display = 'none';
         }
     }
@@ -833,9 +936,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const overlay = document.getElementById('auth-modal-overlay');
             if (overlay) {
                 const loginPage = document.getElementById('auth-page-login');
-                const otpPage   = document.getElementById('auth-page-otp');
+                const otpPage = document.getElementById('auth-page-otp');
                 if (loginPage) loginPage.classList.remove('auth-page-hidden');
-                if (otpPage)   otpPage.classList.add('auth-page-hidden');
+                if (otpPage) otpPage.classList.add('auth-page-hidden');
                 overlay.classList.add('active');
             } else {
                 window.location.href = 'index.html';
@@ -884,8 +987,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const langBtnEl = document.getElementById('language-btn');
         if (langBtnEl) {
             const r = langBtnEl.getBoundingClientRect();
-            picker.style.top   = (r.bottom + 8) + 'px';
-            picker.style.left  = 'auto';
+            picker.style.top = (r.bottom + 8) + 'px';
+            picker.style.left = 'auto';
             picker.style.right = (window.innerWidth - r.right) + 'px';
         }
 
@@ -916,7 +1019,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Avatar dropdown (mutually exclusive with language picker)
-    const avatarBtn      = document.getElementById('user-avatar-btn');
+    const avatarBtn = document.getElementById('user-avatar-btn');
     const avatarDropdown = document.getElementById('avatar-dropdown');
     if (avatarBtn && avatarDropdown) {
         avatarBtn.addEventListener('click', (e) => {
@@ -956,11 +1059,11 @@ document.addEventListener('DOMContentLoaded', () => {
     _initCanvasAuthModal();
 
     function _initCanvasAuthModal() {
-        const overlay  = document.getElementById('auth-modal-overlay');
+        const overlay = document.getElementById('auth-modal-overlay');
         const closeBtn = document.getElementById('auth-modal-close');
-        const backBtn  = document.getElementById('auth-back-btn');
+        const backBtn = document.getElementById('auth-back-btn');
         const googleBtn = document.getElementById('auth-google-btn');
-        const appleBtn  = document.getElementById('auth-apple-btn');
+        const appleBtn = document.getElementById('auth-apple-btn');
         const emailInput = document.getElementById('auth-email-input');
         const emailContinueBtn = document.getElementById('auth-email-continue-btn');
         const resendBtn = document.getElementById('auth-resend-btn');
@@ -972,7 +1075,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (overlay) overlay.classList.remove('active');
             _clearTimer();
             if (emailInput) emailInput.value = '';
-            document.querySelectorAll('.auth-otp-digit').forEach(i => { i.value = ''; i.classList.remove('filled','error'); });
+            document.querySelectorAll('.auth-otp-digit').forEach(i => { i.value = ''; i.classList.remove('filled', 'error'); });
         }
         function _showPage(page) {
             const lp = document.getElementById('auth-page-login');
@@ -1045,7 +1148,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             _showPage('otp');
             _startCountdown();
-            document.querySelectorAll('.auth-otp-digit').forEach(i => { i.value = ''; i.classList.remove('filled','error'); });
+            document.querySelectorAll('.auth-otp-digit').forEach(i => { i.value = ''; i.classList.remove('filled', 'error'); });
             setTimeout(() => document.querySelector('.auth-otp-digit')?.focus(), 100);
         });
         if (emailInput) {
@@ -1062,16 +1165,16 @@ document.addEventListener('DOMContentLoaded', () => {
             inp.addEventListener('input', e => {
                 const v = e.target.value.replace(/\D/g, '');
                 e.target.value = v ? v[0] : '';
-                if (v) { inp.classList.add('filled'); if (i < digits.length - 1) digits[i+1].focus(); else _checkOtp(digits); }
+                if (v) { inp.classList.add('filled'); if (i < digits.length - 1) digits[i + 1].focus(); else _checkOtp(digits); }
                 else inp.classList.remove('filled');
             });
             inp.addEventListener('keydown', e => {
-                if (e.key === 'Backspace' && !inp.value && i > 0) { digits[i-1].focus(); digits[i-1].value = ''; digits[i-1].classList.remove('filled'); }
+                if (e.key === 'Backspace' && !inp.value && i > 0) { digits[i - 1].focus(); digits[i - 1].value = ''; digits[i - 1].classList.remove('filled'); }
             });
             inp.addEventListener('paste', e => {
                 e.preventDefault();
                 const p = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '');
-                p.split('').forEach((c, j) => { if (i+j < digits.length) { digits[i+j].value = c; digits[i+j].classList.add('filled'); } });
+                p.split('').forEach((c, j) => { if (i + j < digits.length) { digits[i + j].value = c; digits[i + j].classList.add('filled'); } });
                 digits[Math.min(i + p.length, digits.length - 1)].focus();
                 _checkOtp(digits);
             });

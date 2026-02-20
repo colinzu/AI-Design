@@ -36,6 +36,11 @@ class CanvasEngine {
         this.isDrawing = false;
         this.isDragging = false;
         this.isResizing = false;
+        this.isRotating = false;
+        this.rotateHandle = null;
+        this.rotateStartAngle = 0;
+        this.rotateElementStartAngle = 0;
+        this.rotateCenterWorld = null;
         this.dragStart = null;
         this.lastMousePos = null;
         this.tempElement = null;
@@ -111,8 +116,17 @@ class CanvasEngine {
         this.render();
     }
 
-    zoom(delta, centerX, centerY) {
-        const zoomFactor = delta > 0 ? 1.04 : 0.96;
+    zoom(delta, centerX, centerY, rawDelta) {
+        // Proportional trackpad pinch: more rawDelta = more zoom, capped to ±25% per event
+        let zoomFactor;
+        if (rawDelta !== undefined) {
+            // Scale: each deltaY unit ≈ 1.2% zoom; cap single event at ±25%
+            const pct = Math.max(-0.25, Math.min(0.25, -rawDelta * 0.012));
+            zoomFactor = 1 + pct;
+        } else {
+            // Keyboard shortcuts — fixed step
+            zoomFactor = delta > 0 ? 1.10 : 0.91;
+        }
         let newScale = this.viewport.scale * zoomFactor;
         newScale = Math.max(this.viewport.minScale, Math.min(this.viewport.maxScale, newScale));
 
@@ -459,7 +473,8 @@ class CanvasEngine {
         this.canvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
         this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
         this.canvas.addEventListener('mouseup', (e) => this.handleMouseUp(e));
-        this.canvas.addEventListener('wheel', (e) => this.handleWheel(e));
+        // passive: false is required so that preventDefault() actually works for wheel events
+        this.canvas.addEventListener('wheel', (e) => this.handleWheel(e), { passive: false });
         this.canvas.addEventListener('dblclick', (e) => this.handleDoubleClick(e));
 
         document.addEventListener('keydown', (e) => this.handleKeyDown(e));
@@ -544,6 +559,26 @@ class CanvasEngine {
             // Check for resize handles first
             const handle = this.getResizeHandle(worldPos.x, worldPos.y);
             if (handle) {
+                // Rotation handle detected
+                if (handle.startsWith('rot-')) {
+                    const element = this.selectedElements[0];
+                    this.isRotating = true;
+                    this.rotateHandle = handle;
+                    // Center of element in world space
+                    this.rotateCenterWorld = {
+                        x: element.x + element.width / 2,
+                        y: element.y + element.height / 2
+                    };
+                    // Angle from center to mouse at drag start
+                    this.rotateStartAngle = Math.atan2(
+                        worldPos.y - this.rotateCenterWorld.y,
+                        worldPos.x - this.rotateCenterWorld.x
+                    );
+                    this.rotateElementStartAngle = element.rotation || 0;
+                    this.canvas.style.cursor = 'grabbing';
+                    return;
+                }
+
                 this.isResizing = true;
                 this.resizeHandle = handle;
 
@@ -641,16 +676,29 @@ class CanvasEngine {
         const y = e.clientY - rect.top;
         const worldPos = this.screenToWorld(x, y);
 
-        // Update cursor for resize handles
-        if (this.currentTool === 'move' && this.selectedElements.length > 0 && !this.isDragging && !this.isResizing) {
+        // Update cursor for resize/rotation handles
+        if (this.currentTool === 'move' && this.selectedElements.length > 0 && !this.isDragging && !this.isResizing && !this.isRotating) {
             const handle = this.getResizeHandle(worldPos.x, worldPos.y);
             this.canvas.style.cursor = this.getHandleCursor(handle);
+
+            // Track which rotation corner the mouse is hovering (problem 3)
+            const newRotCorner = (handle && handle.startsWith('rot-')) ? handle.slice(4) : null;
+            if (newRotCorner !== this.hoveredRotCorner) {
+                this.hoveredRotCorner = newRotCorner;
+                this.scheduleRender(); // Redraw to show/hide rotation indicator
+            }
+        }
+        // Keep grabbing cursor while rotating
+        if (this.isRotating) {
+            this.canvas.style.cursor = 'grabbing';
         }
 
         if (this.isPanning && this.lastMousePos) {
             const dx = x - this.lastMousePos.x;
             const dy = y - this.lastMousePos.y;
             this.pan(dx, dy);
+        } else if (this.isRotating && this.rotateCenterWorld && this.selectedElements.length === 1) {
+            this.updateRotation(worldPos.x, worldPos.y);
         } else if (this.isResizing && this.dragStart) {
             this.updateResize(worldPos.x, worldPos.y, e);
         } else if (this.isDragging && this.dragStartWorld && this.dragStartPositions) {
@@ -794,7 +842,7 @@ class CanvasEngine {
         }
 
         // Handle Click Selection (Deselect others if not dragged and no shift)
-        if (this.currentTool === 'move' && !this.isDragging && !this.isResizing && !this.isSelecting && !e.shiftKey) {
+        if (this.currentTool === 'move' && !this.isDragging && !this.isResizing && !this.isRotating && !this.isSelecting && !e.shiftKey) {
             const rect = this.canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
@@ -817,11 +865,14 @@ class CanvasEngine {
             this.highlightedFrame = null;
         }
 
-        // Save state only if an operation was completed (drag or resize, NOT selection)
-        const shouldSaveState = this.isDragging || this.isResizing;
+        // Save state only if an operation was completed (drag, resize, or rotate, NOT selection)
+        const shouldSaveState = this.isDragging || this.isResizing || this.isRotating;
 
         this.isDragging = false;
         this.isResizing = false;
+        this.isRotating = false;
+        this.rotateHandle = null;
+        this.rotateCenterWorld = null;
         this.isPanning = false; // Reset panning state
         this.isSelecting = false;
         this.resizeHandle = null;
@@ -830,6 +881,7 @@ class CanvasEngine {
         this.dragStartWorld = null;
         this.dragStartPositions = null;
         this.snapGuides = { vertical: [], horizontal: [] }; // Clear snap guides
+        this.render(); // Immediately re-render so snap guide lines disappear on mouse-up
         // Keep lastMousePos for panning inertia if implemented, or just reset
 
         if (this.spacePressed || this.currentTool === 'hand') {
@@ -861,16 +913,24 @@ class CanvasEngine {
         // Find elements within the box
         this.selectedElements = [];
         this.elements.forEach(el => {
-            // Simple bounding box intersection
-            if (el.x >= x && el.x + el.width <= x + width &&
-                el.y >= y && el.y + el.height <= y + height) {
-                this.selectedElements.push(el);
+            // For path elements, derive bounding box from their points array
+            let elX, elY, elW, elH;
+            if (el.type === 'path' && el.points && el.points.length) {
+                const bounds = this.getPathBounds(el);
+                elX = bounds.x;
+                elY = bounds.y;
+                elW = bounds.width;
+                elH = bounds.height;
+            } else {
+                elX = el.x || 0;
+                elY = el.y || 0;
+                elW = el.width || 0;
+                elH = el.height || 0;
             }
-            // Enhance: Partial intersection? Figma usually requires full enclosure for marquee?
-            // Actually Figma default is "Touching" (Partial) for marquee.
-            // Let's implement Partial intersection for better UX.
-            else if (el.x < x + width && el.x + el.width > x &&
-                el.y < y + height && el.y + el.height > y) {
+
+            // Touch / partial intersection — any overlap includes the element
+            if (elX < x + width && elX + elW > x &&
+                elY < y + height && elY + elH > y) {
                 this.selectedElements.push(el);
             }
         });
@@ -884,7 +944,8 @@ class CanvasEngine {
 
         if (e.ctrlKey || e.metaKey) {
             // Zoom with Ctrl/Meta + Wheel (or pinch gesture)
-            this.zoom(-e.deltaY, x, y);
+            // Pass rawDelta for smooth trackpad support
+            this.zoom(-e.deltaY, x, y, e.deltaY);
         } else {
             // Pan with Wheel (or two-finger drag)
             this.pan(-e.deltaX, -e.deltaY);
@@ -981,6 +1042,30 @@ class CanvasEngine {
     }
 
     handleKeyDown(e) {
+        // Intercept browser zoom shortcuts (Ctrl/Cmd + =/-/0) — prevent browser zoom,
+        // redirect to canvas zoom instead
+        if ((e.ctrlKey || e.metaKey) && !this.editingText && !this.isInputActive()) {
+            if (e.key === '=' || e.key === '+') {
+                e.preventDefault();
+                const cx = this.cssWidth / 2;
+                const cy = this.cssHeight / 2;
+                this.zoom(1, cx, cy);
+                return;
+            }
+            if (e.key === '-') {
+                e.preventDefault();
+                const cx = this.cssWidth / 2;
+                const cy = this.cssHeight / 2;
+                this.zoom(-1, cx, cy);
+                return;
+            }
+            if (e.key === '0') {
+                e.preventDefault();
+                this.fitToScreen();
+                return;
+            }
+        }
+
         // Space key for temporary Hand tool - but NOT in input fields
         if (e.code === 'Space' && !this.editingText && !this.isInputActive() && !e.repeat) {
             e.preventDefault();
@@ -1063,11 +1148,7 @@ class CanvasEngine {
             if (shortcuts[key]) {
                 e.preventDefault();
                 this.setTool(shortcuts[key]);
-
-                // For rectangle tool, ensure rectangle shape is selected
-                if (key === 'r') {
-                    this.setShapeType('rectangle');
-                }
+                // Note: R key does NOT reset shape type — the last-used shape is remembered
             }
         }
     }
@@ -1137,6 +1218,7 @@ class CanvasEngine {
 
         this.currentTool = tool;
         this.selectedElements = [];
+        this.hoveredRotCorner = null; // Reset rotation hover state on tool change
 
         // Set appropriate cursor
         if (tool === 'hand') {
@@ -1330,7 +1412,7 @@ class CanvasEngine {
                     width: 0, // Will be set by fitTextElement
                     height: 0, // Will be set by fitTextElement
                     text: '', // Start with empty text
-                    fontSize: 24, // Default larger font size
+                    fontSize: 36, // Default font size (larger for readability)
                     fontFamily: 'Inter',
                     color: '#000000',
                     align: 'left'
@@ -1487,25 +1569,25 @@ class CanvasEngine {
 
                 switch (handle) {
                     case 'se':
-                        newWidth  = worldX - startX;
+                        newWidth = worldX - startX;
                         newHeight = newWidth / startAR;
                         newX = startX;
                         newY = startY;
                         break;
                     case 'sw':
-                        newWidth  = (startX + startW) - worldX;
+                        newWidth = (startX + startW) - worldX;
                         newHeight = newWidth / startAR;
                         newX = worldX;
                         newY = startY;
                         break;
                     case 'ne':
-                        newWidth  = worldX - startX;
+                        newWidth = worldX - startX;
                         newHeight = newWidth / startAR;
                         newX = startX;
                         newY = (startY + startH) - newHeight;
                         break;
                     case 'nw':
-                        newWidth  = (startX + startW) - worldX;
+                        newWidth = (startX + startW) - worldX;
                         newHeight = newWidth / startAR;
                         newX = worldX;
                         newY = (startY + startH) - newHeight;
@@ -1617,6 +1699,52 @@ class CanvasEngine {
         this.render();
     }
 
+    updateRotation(worldX, worldY) {
+        const element = this.selectedElements[0];
+        const cx = this.rotateCenterWorld.x;
+        const cy = this.rotateCenterWorld.y;
+
+        // Current angle from center to mouse
+        const currentAngle = Math.atan2(worldY - cy, worldX - cx);
+
+        // Delta from when drag started
+        let angleDelta = currentAngle - this.rotateStartAngle;
+
+        // New raw rotation
+        let newRotation = this.rotateElementStartAngle + angleDelta;
+
+        // Snap to key rotation angles: 15°, 30°, 45°, 60°, 90° (and their multiples)
+        const snapThresholdRad = (5 / 180) * Math.PI; // 5° tolerance for snapping
+        // All multiples of 15° from 0 to 360
+        const snapAngles = Array.from({ length: 25 }, (_, i) => (i * 15) * Math.PI / 180);
+
+        // Normalize newRotation to [0, 2π)
+        const normalized = ((newRotation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+
+        // Find closest snap angle
+        let closestSnap = null;
+        let minDist = Infinity;
+        for (const snapAngle of snapAngles) {
+            const dist = Math.abs(normalized - snapAngle);
+            const dist2 = Math.abs(normalized - snapAngle + 2 * Math.PI);
+            const dist3 = Math.abs(normalized - snapAngle - 2 * Math.PI);
+            const d = Math.min(dist, dist2, dist3);
+            if (d < minDist) {
+                minDist = d;
+                closestSnap = snapAngle;
+            }
+        }
+
+        if (minDist < snapThresholdRad) {
+            // Snap: align to snapped angle, keeping consistent with newRotation sign
+            const snapDelta = closestSnap - normalized;
+            newRotation += snapDelta;
+        }
+
+        element.rotation = newRotation;
+        this.render();
+    }
+
     getResizeHandle(worldX, worldY) {
         if (this.selectedElements.length !== 1) return null;
 
@@ -1625,6 +1753,9 @@ class CanvasEngine {
         const cornerHit = 10 / this.viewport.scale;
         // Edge handles: respond along the FULL edge length (8 screen px wide zone)
         const edgeHit = 8 / this.viewport.scale;
+        // Rotation zone: outer ring beyond corner handles (10–28 screen px outside corner)
+        const rotOuter = 28 / this.viewport.scale;
+        const rotInner = cornerHit; // start where corner handle ends
 
         if (element.type === 'shape' && element.shapeType === 'line') {
             if (Math.abs(worldX - element.x) < cornerHit && Math.abs(worldY - element.y) < cornerHit) return 'nw';
@@ -1632,13 +1763,29 @@ class CanvasEngine {
             return null;
         }
 
+        // Use axis-aligned bounding box for handle detection
+        // If element is rotated, we still check against the AABB corner positions
         const { x, y, width, height } = element;
 
-        // Corners first — highest priority
+        // Helper: check if point is in the rotation annular zone at a corner
+        const inRotZone = (cx, cy) => {
+            const dx = worldX - cx;
+            const dy = worldY - cy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            return dist >= rotInner && dist <= rotOuter;
+        };
+
+        // Corners first — highest priority (resize)
         if (Math.abs(worldX - x) < cornerHit && Math.abs(worldY - y) < cornerHit) return 'nw';
         if (Math.abs(worldX - (x + width)) < cornerHit && Math.abs(worldY - y) < cornerHit) return 'ne';
         if (Math.abs(worldX - (x + width)) < cornerHit && Math.abs(worldY - (y + height)) < cornerHit) return 'se';
         if (Math.abs(worldX - x) < cornerHit && Math.abs(worldY - (y + height)) < cornerHit) return 'sw';
+
+        // Rotation zones — just outside each corner
+        if (inRotZone(x, y)) return 'rot-nw';
+        if (inRotZone(x + width, y)) return 'rot-ne';
+        if (inRotZone(x + width, y + height)) return 'rot-se';
+        if (inRotZone(x, y + height)) return 'rot-sw';
 
         // Edges: trigger anywhere along the full edge (excluding the corner zones)
         const inXRange = worldX >= x + cornerHit && worldX <= x + width - cornerHit;
@@ -1654,6 +1801,7 @@ class CanvasEngine {
 
     getHandleCursor(handle) {
         if (!handle) return 'default';
+        if (handle.startsWith('rot-')) return 'grab';
         const cursors = {
             'nw': 'nw-resize',
             'n': 'n-resize',
@@ -1774,30 +1922,43 @@ class CanvasEngine {
 
         this.editingText = element;
 
-        // Create input overlay
+        // Create input overlay positioned to match the canvas element exactly
         const input = document.createElement('textarea');
         input.value = element.text;
         input.style.position = 'fixed';
 
+        // Must include the canvas's own offset on the page
+        const canvasRect = this.canvas.getBoundingClientRect();
         const screenPos = this.worldToScreen(element.x, element.y);
-        input.style.left = screenPos.x + 'px';
-        input.style.top = screenPos.y + 'px';
-        input.style.width = (element.width * this.viewport.scale) + 'px';
-        input.style.height = (element.height * this.viewport.scale) + 'px';
-        input.style.fontSize = (element.fontSize * this.viewport.scale) + 'px';
+        const scaledFontSize = element.fontSize * this.viewport.scale;
+        const scaledWidth = Math.max(element.width * this.viewport.scale, scaledFontSize * 3);
+        const scaledHeight = Math.max(element.height * this.viewport.scale, scaledFontSize * 1.5);
+
+        input.style.left = (canvasRect.left + screenPos.x) + 'px';
+        input.style.top = (canvasRect.top + screenPos.y) + 'px';
+        input.style.width = scaledWidth + 'px';
+        input.style.height = scaledHeight + 'px';
+        input.style.fontSize = scaledFontSize + 'px';
         input.style.fontFamily = element.fontFamily;
         input.style.color = element.color;
-        input.style.background = 'transparent';
-        input.style.border = '1px solid #0099B8';
+        input.style.background = 'rgba(255,255,255,0.92)';
+        input.style.border = '1.5px solid #0099B8';
+        input.style.borderRadius = '3px';
         input.style.outline = 'none';
         input.style.resize = 'none';
         input.style.padding = '4px';
+        input.style.lineHeight = '1.2';
+        input.style.boxSizing = 'border-box';
         input.style.zIndex = '10000';
+        input.style.overflow = 'hidden';
 
         this.textInput = input;
         document.body.appendChild(input);
         input.focus();
-        input.select();
+        // Select all text immediately so user can type to replace or edit
+        setTimeout(() => {
+            input.select();
+        }, 0);
 
         const finishEditing = () => {
             const newText = input.value.trim();
@@ -2039,129 +2200,110 @@ class CanvasEngine {
         // Render snap guide lines (Figma-style) - show during drag or resize
         if (this.snapGuides && (this.isDragging || this.resizeHandle) && (this.snapGuides.vertical.length > 0 || this.snapGuides.horizontal.length > 0)) {
             this.ctx.save();
-            this.ctx.strokeStyle = 'rgba(255, 51, 102, 0.5)'; // Lighter pink/red
+            const guideColor = 'rgba(255, 51, 102, 0.75)';
+            this.ctx.strokeStyle = guideColor;
             this.ctx.lineWidth = 1 / this.viewport.scale; // Always 1 screen pixel
             this.ctx.setLineDash([]); // Solid line
 
-            // Calculate bounds for guide lines based on aligned elements
-            const getBounds = () => {
-                let minX = Infinity, maxX = -Infinity;
-                let minY = Infinity, maxY = -Infinity;
-
-                this.selectedElements.forEach(el => {
-                    minX = Math.min(minX, el.x);
-                    maxX = Math.max(maxX, el.x + el.width);
-                    minY = Math.min(minY, el.y);
-                    maxY = Math.max(maxY, el.y + el.height);
-                });
-
-                // Extend bounds to include nearby elements that might be aligned
-                this.elements.forEach(el => {
-                    if (!this.selectedElements.includes(el)) {
-                        // Check if this element is near the guide lines
-                        const nearVertical = this.snapGuides.vertical.some(x =>
-                            Math.abs(el.x - x) < 5 || Math.abs(el.x + el.width - x) < 5 || Math.abs(el.x + el.width / 2 - x) < 5
-                        );
-                        const nearHorizontal = this.snapGuides.horizontal.some(y =>
-                            Math.abs(el.y - y) < 5 || Math.abs(el.y + el.height - y) < 5 || Math.abs(el.y + el.height / 2 - y) < 5
-                        );
-
-                        if (nearVertical || nearHorizontal) {
-                            minX = Math.min(minX, el.x);
-                            maxX = Math.max(maxX, el.x + el.width);
-                            minY = Math.min(minY, el.y);
-                            maxY = Math.max(maxY, el.y + el.height);
-                        }
-                    }
-                });
-
-                return { minX, maxX, minY, maxY };
+            // Helper: draw a small × cross at world-space point (wx, wy)
+            const crossSize = 4 / this.viewport.scale;
+            const drawCross = (wx, wy) => {
+                this.ctx.beginPath();
+                this.ctx.moveTo(wx - crossSize, wy - crossSize);
+                this.ctx.lineTo(wx + crossSize, wy + crossSize);
+                this.ctx.moveTo(wx + crossSize, wy - crossSize);
+                this.ctx.lineTo(wx - crossSize, wy + crossSize);
+                this.ctx.stroke();
             };
 
-            const bounds = getBounds();
+            // All elements for alignment checks
+            const allElements = this.elements;
+            const tolerance = 5;
 
             // Draw vertical guide lines
-            this.snapGuides.vertical.forEach(x => {
-                // Check if this is a center alignment (x is at center of any element)
+            this.snapGuides.vertical.forEach(guideX => {
+                // Collect all elements whose edge or center aligns at guideX
+                let minY = Infinity, maxY = -Infinity;
                 let isCenterLine = false;
-                let centerY1 = bounds.minY;
-                let centerY2 = bounds.maxY;
+                let centerMinY = Infinity, centerMaxY = -Infinity;
 
-                // Check selected elements
-                this.selectedElements.forEach(el => {
-                    const elCenterX = el.x + el.width / 2;
-                    if (Math.abs(elCenterX - x) < 1) {
+                allElements.forEach(el => {
+                    const left = el.x;
+                    const right = el.x + el.width;
+                    const centerX = el.x + el.width / 2;
+                    const elTop = el.y;
+                    const elBottom = el.y + el.height;
+
+                    if (Math.abs(centerX - guideX) < tolerance) {
                         isCenterLine = true;
-                        centerY1 = Math.min(centerY1, el.y + el.height / 2);
-                        centerY2 = Math.max(centerY2, el.y + el.height / 2);
+                        centerMinY = Math.min(centerMinY, el.y + el.height / 2);
+                        centerMaxY = Math.max(centerMaxY, el.y + el.height / 2);
+                    } else if (Math.abs(left - guideX) < tolerance || Math.abs(right - guideX) < tolerance) {
+                        minY = Math.min(minY, elTop);
+                        maxY = Math.max(maxY, elBottom);
                     }
                 });
 
-                // Check other elements
-                this.elements.forEach(el => {
-                    if (!this.selectedElements.includes(el)) {
-                        const elCenterX = el.x + el.width / 2;
-                        if (Math.abs(elCenterX - x) < 1) {
-                            isCenterLine = true;
-                            centerY1 = Math.min(centerY1, el.y + el.height / 2);
-                            centerY2 = Math.max(centerY2, el.y + el.height / 2);
-                        }
-                    }
-                });
-
+                let y1, y2;
                 this.ctx.beginPath();
                 if (isCenterLine) {
-                    // For center lines, only draw between the center points
-                    this.ctx.moveTo(x, centerY1);
-                    this.ctx.lineTo(x, centerY2);
-                } else {
-                    // For edge lines, draw full height
-                    this.ctx.moveTo(x, bounds.minY);
-                    this.ctx.lineTo(x, bounds.maxY);
+                    y1 = centerMinY; y2 = centerMaxY;
+                    this.ctx.moveTo(guideX, y1);
+                    this.ctx.lineTo(guideX, y2);
+                } else if (minY <= maxY) {
+                    y1 = minY; y2 = maxY;
+                    this.ctx.moveTo(guideX, y1);
+                    this.ctx.lineTo(guideX, y2);
                 }
                 this.ctx.stroke();
+                // Draw × at both endpoints
+                if (y1 !== undefined) {
+                    drawCross(guideX, y1);
+                    drawCross(guideX, y2);
+                }
             });
 
             // Draw horizontal guide lines
-            this.snapGuides.horizontal.forEach(y => {
-                // Check if this is a center alignment (y is at center of any element)
+            this.snapGuides.horizontal.forEach(guideY => {
+                // Collect all elements whose edge or center aligns at guideY
+                let minX = Infinity, maxX = -Infinity;
                 let isCenterLine = false;
-                let centerX1 = bounds.minX;
-                let centerX2 = bounds.maxX;
+                let centerMinX = Infinity, centerMaxX = -Infinity;
 
-                // Check selected elements
-                this.selectedElements.forEach(el => {
-                    const elCenterY = el.y + el.height / 2;
-                    if (Math.abs(elCenterY - y) < 1) {
+                allElements.forEach(el => {
+                    const top = el.y;
+                    const bottom = el.y + el.height;
+                    const centerY = el.y + el.height / 2;
+                    const elLeft = el.x;
+                    const elRight = el.x + el.width;
+
+                    if (Math.abs(centerY - guideY) < tolerance) {
                         isCenterLine = true;
-                        centerX1 = Math.min(centerX1, el.x + el.width / 2);
-                        centerX2 = Math.max(centerX2, el.x + el.width / 2);
+                        centerMinX = Math.min(centerMinX, el.x + el.width / 2);
+                        centerMaxX = Math.max(centerMaxX, el.x + el.width / 2);
+                    } else if (Math.abs(top - guideY) < tolerance || Math.abs(bottom - guideY) < tolerance) {
+                        minX = Math.min(minX, elLeft);
+                        maxX = Math.max(maxX, elRight);
                     }
                 });
 
-                // Check other elements
-                this.elements.forEach(el => {
-                    if (!this.selectedElements.includes(el)) {
-                        const elCenterY = el.y + el.height / 2;
-                        if (Math.abs(elCenterY - y) < 1) {
-                            isCenterLine = true;
-                            centerX1 = Math.min(centerX1, el.x + el.width / 2);
-                            centerX2 = Math.max(centerX2, el.x + el.width / 2);
-                        }
-                    }
-                });
-
+                let x1, x2;
                 this.ctx.beginPath();
                 if (isCenterLine) {
-                    // For center lines, only draw between the center points
-                    this.ctx.moveTo(centerX1, y);
-                    this.ctx.lineTo(centerX2, y);
-                } else {
-                    // For edge lines, draw full width
-                    this.ctx.moveTo(bounds.minX, y);
-                    this.ctx.lineTo(bounds.maxX, y);
+                    x1 = centerMinX; x2 = centerMaxX;
+                    this.ctx.moveTo(x1, guideY);
+                    this.ctx.lineTo(x2, guideY);
+                } else if (minX <= maxX) {
+                    x1 = minX; x2 = maxX;
+                    this.ctx.moveTo(x1, guideY);
+                    this.ctx.lineTo(x2, guideY);
                 }
                 this.ctx.stroke();
+                // Draw × at both endpoints
+                if (x1 !== undefined) {
+                    drawCross(x1, guideY);
+                    drawCross(x2, guideY);
+                }
             });
 
             this.ctx.restore();
@@ -2227,6 +2369,15 @@ class CanvasEngine {
     renderElement(el) {
         this.ctx.save();
 
+        // Apply rotation transform around element center
+        if (el.rotation && el.rotation !== 0 && el.width !== undefined && el.height !== undefined) {
+            const cx = el.x + el.width / 2;
+            const cy = el.y + el.height / 2;
+            this.ctx.translate(cx, cy);
+            this.ctx.rotate(el.rotation);
+            this.ctx.translate(-cx, -cy);
+        }
+
         switch (el.type) {
             case 'frame':
                 this.ctx.fillStyle = el.fill;
@@ -2285,6 +2436,8 @@ class CanvasEngine {
                 break;
 
             case 'text':
+                // Skip rendering text while it is being edited in textarea overlay
+                if (el === this.editingText) break;
                 this.ctx.font = `${el.fontSize}px ${el.fontFamily}`;
                 this.ctx.fillStyle = el.color;
                 this.ctx.textAlign = el.align || 'left';
@@ -2432,6 +2585,17 @@ class CanvasEngine {
     }
 
     renderSelection(el) {
+        this.ctx.save();
+
+        // Apply same rotation transform as renderElement so selection aligns with rotated element
+        if (el.rotation && el.rotation !== 0 && el.width !== undefined && el.height !== undefined) {
+            const cx = el.x + el.width / 2;
+            const cy = el.y + el.height / 2;
+            this.ctx.translate(cx, cy);
+            this.ctx.rotate(el.rotation);
+            this.ctx.translate(-cx, -cy);
+        }
+
         // Use #0099B8 color and 1px solid border
         this.ctx.strokeStyle = '#0099B8';
         this.ctx.lineWidth = 1 / this.viewport.scale;
@@ -2502,7 +2666,7 @@ class CanvasEngine {
 
             // Draw resize handles - only 4 corners, small circles
             const handleRadius = 3 / this.viewport.scale; // Small 3px radius circles
-            const handles = [
+            const cornerHandles = [
                 { x: el.x, y: el.y },                           // Top-left
                 { x: el.x + el.width, y: el.y },                // Top-right
                 { x: el.x + el.width, y: el.y + el.height },    // Bottom-right
@@ -2513,15 +2677,97 @@ class CanvasEngine {
             this.ctx.strokeStyle = '#0099B8';
             this.ctx.lineWidth = 1 / this.viewport.scale;
 
-            handles.forEach(handle => {
+            cornerHandles.forEach(handle => {
                 this.ctx.beginPath();
                 this.ctx.arc(handle.x, handle.y, handleRadius, 0, Math.PI * 2);
                 this.ctx.fill();
                 this.ctx.stroke();
             });
+
+            // Draw rotation arc indicators at corners (only when single element selected)
+            if (this.selectedElements.length === 1) {
+                // Only draw the corner that the mouse is currently hovering over (problem 3)
+                this.drawRotationHandles(el, this.hoveredRotCorner || null);
+            }
         }
 
         this.ctx.setLineDash([]);
+        this.ctx.restore();
+    }
+
+    drawRotationHandles(el, onlyCorner = null) {
+        // Draw a small curved arrow arc outside each corner to indicate rotation is available.
+        // onlyCorner: if provided ('nw'|'ne'|'se'|'sw'), only draw that corner.
+        // If null, nothing is drawn (rotation hints shown on demand only).
+        if (onlyCorner === null) return;  // No hover — don't show anything
+
+        const arcRadius = 10 / this.viewport.scale;
+        const arcGap = 5 / this.viewport.scale;   // gap between corner handle and arc start
+        const arcSweep = Math.PI / 2.5;            // ~72° arc sweep
+        const arrowSize = 4 / this.viewport.scale;
+
+        this.ctx.save();
+        this.ctx.strokeStyle = 'rgba(0, 153, 184, 0.85)';
+        this.ctx.lineWidth = 2 / this.viewport.scale;
+        this.ctx.lineCap = 'round';
+        this.ctx.setLineDash([]);
+
+        const allCorners = [
+            {
+                id: 'nw', x: el.x, y: el.y,              // NW corner
+                startAngle: Math.PI, endAngle: Math.PI + arcSweep, arrowDir: 1
+            },
+            {
+                id: 'ne', x: el.x + el.width, y: el.y,              // NE corner
+                startAngle: -Math.PI / 2 - arcSweep / 2, endAngle: -Math.PI / 2 + arcSweep / 2, arrowDir: 1
+            },
+            {
+                id: 'se', x: el.x + el.width, y: el.y + el.height,  // SE corner
+                startAngle: 0, endAngle: arcSweep, arrowDir: 1
+            },
+            {
+                id: 'sw', x: el.x, y: el.y + el.height,  // SW corner
+                startAngle: Math.PI / 2 - arcSweep / 2, endAngle: Math.PI / 2 + arcSweep / 2, arrowDir: 1
+            }
+        ];
+
+        const offsets = [
+            { dx: -1, dy: -1 },  // NW
+            { dx: 1, dy: -1 },  // NE
+            { dx: 1, dy: 1 },  // SE
+            { dx: -1, dy: 1 },  // SW
+        ];
+
+        allCorners.forEach((corner, idx) => {
+            if (corner.id !== onlyCorner) return; // Only draw hovered corner
+
+            const diag = arcRadius + arcGap;
+            const off = offsets[idx];
+            const cx = corner.x + off.dx * diag;
+            const cy = corner.y + off.dy * diag;
+
+            this.ctx.beginPath();
+            this.ctx.arc(cx, cy, arcRadius, corner.startAngle, corner.endAngle, false);
+            this.ctx.stroke();
+
+            // Draw arrowhead at end of arc
+            const endX = cx + arcRadius * Math.cos(corner.endAngle);
+            const endY = cy + arcRadius * Math.sin(corner.endAngle);
+            const tangentAngle = corner.endAngle + Math.PI / 2;
+            this.ctx.beginPath();
+            this.ctx.moveTo(
+                endX + arrowSize * Math.cos(tangentAngle - 0.5),
+                endY + arrowSize * Math.sin(tangentAngle - 0.5)
+            );
+            this.ctx.lineTo(endX, endY);
+            this.ctx.lineTo(
+                endX + arrowSize * Math.cos(tangentAngle + 0.5),
+                endY + arrowSize * Math.sin(tangentAngle + 0.5)
+            );
+            this.ctx.stroke();
+        });
+
+        this.ctx.restore();
     }
 
     // ==================== Frame Container Logic ====================
@@ -2606,9 +2852,33 @@ class CanvasEngine {
 
         if (bestOverlap > 0.5 && bestFrame) {
             this.attachToFrame(element, bestFrame);
+            // Ensure new element renders on TOP: move it to after all existing children of this frame
+            this.bringToTopOfFrame(element, bestFrame);
         } else {
             this.detachFromFrame(element);
         }
+    }
+
+    // Move element to the end of its frame's children in this.elements (so it renders on top)
+    bringToTopOfFrame(element, frame) {
+        // Find the last index of any child of this frame in this.elements
+        let lastChildIndex = -1;
+        for (let i = 0; i < this.elements.length; i++) {
+            if (this.elements[i].parentFrame === frame && this.elements[i] !== element) {
+                lastChildIndex = i;
+            }
+        }
+        const currentIndex = this.elements.indexOf(element);
+        if (currentIndex === -1) return;
+
+        // Only move if element is not already after all other children
+        if (lastChildIndex === -1 || currentIndex > lastChildIndex) return;
+
+        // Remove and re-insert after lastChildIndex
+        this.elements.splice(currentIndex, 1);
+        // After removal, index shifts down if removal was before lastChildIndex
+        const insertAt = lastChildIndex - (currentIndex < lastChildIndex ? 1 : 0) + 1;
+        this.elements.splice(insertAt, 0, element);
     }
 
     // Render loading overlay on a generating frame (called after children are drawn)
@@ -2677,7 +2947,7 @@ class CanvasEngine {
 
     _isStandardRatio(width, height) {
         const STANDARD_RATIOS = [
-            1, 3/2, 2/3, 3/4, 4/3, 4/5, 5/4, 9/16, 16/9,
+            1, 3 / 2, 2 / 3, 3 / 4, 4 / 3, 4 / 5, 5 / 4, 9 / 16, 16 / 9,
         ];
         const ratio = width / height;
         return STANDARD_RATIOS.some(r => Math.abs(ratio - r) < 0.02);

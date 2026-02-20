@@ -468,7 +468,7 @@
             id: photo.id,
             source: 'unsplash',
             thumbUrl: photo.urls?.small || photo.urls?.thumb,
-            fullUrl: photo.urls?.regular || photo.urls?.full,
+            fullUrl: photo.urls?.full || photo.urls?.regular,  // Prefer full resolution
             width: photo.width,
             height: photo.height,
             alt: photo.alt_description || photo.description || '',

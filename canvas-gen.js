@@ -47,15 +47,15 @@
 
     // Supported aspect ratios by Gemini API
     const SUPPORTED_RATIOS = [
-        { label: '1:1',   value: 1 / 1 },
-        { label: '3:2',   value: 3 / 2 },
-        { label: '2:3',   value: 2 / 3 },
-        { label: '3:4',   value: 3 / 4 },
-        { label: '4:3',   value: 4 / 3 },
-        { label: '4:5',   value: 4 / 5 },
-        { label: '5:4',   value: 5 / 4 },
-        { label: '9:16',  value: 9 / 16 },
-        { label: '16:9',  value: 16 / 9 },
+        { label: '1:1', value: 1 / 1 },
+        { label: '3:2', value: 3 / 2 },
+        { label: '2:3', value: 2 / 3 },
+        { label: '3:4', value: 3 / 4 },
+        { label: '4:3', value: 4 / 3 },
+        { label: '4:5', value: 4 / 5 },
+        { label: '5:4', value: 5 / 4 },
+        { label: '9:16', value: 9 / 16 },
+        { label: '16:9', value: 16 / 9 },
     ];
 
     function getClosestAspectRatio(width, height) {
@@ -134,19 +134,19 @@
 
         // Cache frequently accessed child elements
         const els = {
-            collapsed:     dom.querySelector('.gen-collapsed'),
-            expanded:      dom.querySelector('.gen-expanded'),
-            thinking:      dom.querySelector('.gen-thinking'),
-            editor:        dom.querySelector('.gen-input-editor'),
+            collapsed: dom.querySelector('.gen-collapsed'),
+            expanded: dom.querySelector('.gen-expanded'),
+            thinking: dom.querySelector('.gen-thinking'),
+            editor: dom.querySelector('.gen-input-editor'),
             uploadedImages: dom.querySelector('.gen-uploaded-images'),
-            addBtn:        dom.querySelector('.gen-add-btn'),
+            addBtn: dom.querySelector('.gen-add-btn'),
             modelSelector: dom.querySelector('.gen-model-selector'),
             countSelector: dom.querySelector('.gen-count-selector'),
-            countMenu:     dom.querySelector('.gen-count-menu'),
-            sendBtn:       dom.querySelector('.gen-send-btn'),
-            stopBtn:       dom.querySelector('.gen-stop-btn'),
-            countLabel:    dom.querySelector('.gen-count-label'),
-            modelLabel:    dom.querySelector('.gen-model-label'),
+            countMenu: dom.querySelector('.gen-count-menu'),
+            sendBtn: dom.querySelector('.gen-send-btn'),
+            stopBtn: dom.querySelector('.gen-stop-btn'),
+            countLabel: dom.querySelector('.gen-count-label'),
+            modelLabel: dom.querySelector('.gen-model-label'),
         };
 
         const instance = {
@@ -229,14 +229,15 @@
         if (!engine || !state.currentAnchor) return;
 
         const anchor = state.currentAnchor;
-        const worldCenterX = anchor.x + anchor.width / 2;
-        const worldBottomY = anchor.y + anchor.height;
+        const worldCenterX = anchor.x + (anchor.width || 0) / 2;
+        const worldBottomY = anchor.y + (anchor.height || 0);
         const screenPos = engine.worldToScreen(worldCenterX, worldBottomY);
 
         if (!screenPos || typeof screenPos.x !== 'number') return;
 
-        dom.style.left = screenPos.x + 'px';
-        dom.style.top = (screenPos.y + 16) + 'px';
+        const rect = engine.canvas.getBoundingClientRect();
+        dom.style.left = (rect.left + screenPos.x) + 'px';
+        dom.style.top = (rect.top + screenPos.y + 16) + 'px';
     }
 
     function autoFocusEditor(instance) {
@@ -279,69 +280,254 @@
     function getSelectionBounds(elements) {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const el of elements) {
-            minX = Math.min(minX, el.x);
-            minY = Math.min(minY, el.y);
-            maxX = Math.max(maxX, el.x + (el.width || 0));
-            maxY = Math.max(maxY, el.y + (el.height || 0));
+            if (el.type === 'path' && el.points && el.points.length) {
+                // Path elements store bounds via their points array
+                for (const p of el.points) {
+                    minX = Math.min(minX, p.x);
+                    minY = Math.min(minY, p.y);
+                    maxX = Math.max(maxX, p.x);
+                    maxY = Math.max(maxY, p.y);
+                }
+            } else {
+                minX = Math.min(minX, el.x || 0);
+                minY = Math.min(minY, el.y || 0);
+                maxX = Math.max(maxX, (el.x || 0) + (el.width || 0));
+                maxY = Math.max(maxY, (el.y || 0) + (el.height || 0));
+            }
         }
         return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
     }
 
     /**
-     * Collect selected image elements as reference images for a panel instance.
+     * Render selected elements to an image. Handles frame (with children), image, text, shape, path.
+     * Returns { dataUrl, thumbUrl, name } or null on failure.
+     */
+    function renderSelectionToImage(elements, engine) {
+        if (!elements.length || !engine) return null;
+
+        const toRender = [];
+        for (const el of elements) {
+            if (el.type === 'frame') {
+                toRender.push(el);
+                const children = engine.getFrameChildren ? engine.getFrameChildren(el) : [];
+                children.forEach(c => toRender.push(c));
+            } else {
+                toRender.push(el);
+            }
+        }
+
+        // Use the full element set (including frame children) for accurate bounds
+        const bounds = getSelectionBounds(toRender);
+        const w = Math.max(1, bounds.width);
+        const h = Math.max(1, bounds.height);
+        // Cap at 2048px on the longest side — no lossy downscale below 1024
+        const maxPx = 2048;
+        const scale = Math.min(1, maxPx / Math.max(w, h));
+        const outW = Math.max(1, Math.round(w * scale));
+        const outH = Math.max(1, Math.round(h * scale));
+        const scaleX = outW / w;
+        const scaleY = outH / h;
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = outW;
+        tempCanvas.height = outH;
+        const ctx = tempCanvas.getContext('2d');
+        if (!ctx) return null;
+
+        for (const el of toRender) {
+            const localX = el.x - bounds.x;
+            const localY = el.y - bounds.y;
+            const sx = localX * scaleX;
+            const sy = localY * scaleY;
+            const sw = (el.width || 0) * scaleX;
+            const sh = (el.height || 0) * scaleY;
+
+            ctx.save();
+
+            if (el.type === 'frame') {
+                ctx.fillStyle = el.fill || '#fff';
+                ctx.fillRect(sx, sy, sw, sh);
+            } else if (el.type === 'image' && el.image) {
+                ctx.drawImage(el.image, 0, 0, el.image.naturalWidth, el.image.naturalHeight, sx, sy, sw, sh);
+            } else if (el.type === 'text') {
+                ctx.font = `${(el.fontSize || 14) * scaleY}px ${el.fontFamily || 'Inter'}`;
+                ctx.fillStyle = el.color || '#000';
+                ctx.textAlign = el.align || 'left';
+                ctx.textBaseline = 'top';
+                const lines = (el.text || '').split('\n');
+                const lineHeight = (el.fontSize || 14) * 1.2 * scaleY;
+                lines.forEach((line, i) => {
+                    ctx.fillText(line, sx + 5 * scaleX, sy + 5 * scaleY + i * lineHeight);
+                });
+            } else if (el.type === 'shape') {
+                const st = el.shapeType || 'rectangle';
+                ctx.beginPath();
+                if (st === 'rectangle') {
+                    const r = (el.cornerRadius || 0) * Math.min(scaleX, scaleY);
+                    if (r) ctx.roundRect(sx, sy, sw, sh, r);
+                    else ctx.rect(sx, sy, sw, sh);
+                } else if (st === 'ellipse') {
+                    ctx.ellipse(sx + sw / 2, sy + sh / 2, sw / 2, sh / 2, 0, 0, Math.PI * 2);
+                } else if (st === 'line') {
+                    ctx.moveTo(sx, sy);
+                    ctx.lineTo((el.x2 - bounds.x) * scaleX, (el.y2 - bounds.y) * scaleY);
+                } else if (st === 'triangle') {
+                    const cx = sx + sw / 2, cy = sy + sh / 2;
+                    const r = Math.min(sw, sh) / 2;
+                    for (let i = 0; i < 3; i++) {
+                        const a = -Math.PI / 2 + (i * 2 * Math.PI / 3);
+                        const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
+                        if (i === 0) ctx.moveTo(px, py);
+                        else ctx.lineTo(px, py);
+                    }
+                    ctx.closePath();
+                } else if (st === 'star') {
+                    const cx = sx + sw / 2, cy = sy + sh / 2;
+                    const or = Math.min(sw, sh) / 2, ir = or * 0.382;
+                    for (let i = 0; i < 10; i++) {
+                        const a = -Math.PI / 2 + (i * Math.PI / 5);
+                        const r = i % 2 === 0 ? or : ir;
+                        const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
+                        if (i === 0) ctx.moveTo(px, py);
+                        else ctx.lineTo(px, py);
+                    }
+                    ctx.closePath();
+                } else {
+                    ctx.rect(sx, sy, sw, sh);
+                }
+                if (el.fill && el.fill !== 'none') {
+                    ctx.fillStyle = el.fill;
+                    ctx.fill();
+                }
+                if (el.stroke && el.strokeWidth > 0) {
+                    ctx.strokeStyle = el.stroke;
+                    ctx.lineWidth = el.strokeWidth * Math.min(scaleX, scaleY);
+                    ctx.stroke();
+                }
+            } else if (el.type === 'path' && el.points && el.points.length) {
+                ctx.beginPath();
+                el.points.forEach((p, i) => {
+                    const px = (p.x - bounds.x) * scaleX, py = (p.y - bounds.y) * scaleY;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                });
+                ctx.strokeStyle = el.stroke || '#000';
+                ctx.lineWidth = (el.strokeWidth || 2) * Math.min(scaleX, scaleY);
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.stroke();
+            }
+
+            ctx.restore();
+        }
+
+        // Always export as PNG — no black background, full fidelity, no JPEG artefacts.
+        const dataUrl = tempCanvas.toDataURL('image/png');
+
+        const thumbSize = 64;
+        let thumbUrl;
+
+        // For text elements: generate a first-character thumbnail for the chip
+        const isSingleText = elements.length === 1 && elements[0].type === 'text';
+        if (isSingleText) {
+            const el = elements[0];
+            const firstChar = (el.text || '').trim().charAt(0) || 'T';
+            const thumbCanvas = document.createElement('canvas');
+            thumbCanvas.width = thumbSize;
+            thumbCanvas.height = thumbSize;
+            const thumbCtx = thumbCanvas.getContext('2d');
+            thumbCtx.fillStyle = '#f5f5f5';
+            thumbCtx.fillRect(0, 0, thumbSize, thumbSize);
+            const fontSize = Math.round(thumbSize * 0.6);
+            thumbCtx.font = `bold ${fontSize}px ${el.fontFamily || 'Inter'}`;
+            thumbCtx.fillStyle = el.color || '#000';
+            thumbCtx.textAlign = 'center';
+            thumbCtx.textBaseline = 'middle';
+            thumbCtx.fillText(firstChar, thumbSize / 2, thumbSize / 2);
+            thumbUrl = thumbCanvas.toDataURL('image/png');
+        } else {
+            const aspect = outW / outH;
+            const thumbW = aspect >= 1 ? thumbSize : Math.round(thumbSize * aspect);
+            const thumbH = aspect >= 1 ? Math.round(thumbSize / aspect) : thumbSize;
+            const thumbCanvas = document.createElement('canvas');
+            thumbCanvas.width = thumbW;
+            thumbCanvas.height = thumbH;
+            const thumbCtx = thumbCanvas.getContext('2d');
+            // Fill white so the chip thumbnail always has a legible background
+            thumbCtx.fillStyle = '#ffffff';
+            thumbCtx.fillRect(0, 0, thumbW, thumbH);
+            thumbCtx.drawImage(tempCanvas, 0, 0, outW, outH, 0, 0, thumbW, thumbH);
+            thumbUrl = thumbCanvas.toDataURL('image/png');
+        }
+
+        // Shape name mapping — use consistent "Circle" for ellipse type
+        const SHAPE_NAMES = {
+            rectangle: 'Rectangle',
+            ellipse: 'Circle',
+            triangle: 'Triangle',
+            star: 'Star',
+            line: 'Line',
+        };
+
+        let name = 'Selection';
+        if (elements.length === 1) {
+            const el = elements[0];
+            if (el.type === 'frame') name = (el.name || 'Frame').split(/\s+/).slice(0, 2).join(' ');
+            else if (el.type === 'image') name = 'Image';
+            else if (el.type === 'text') name = 'Text';
+            else if (el.type === 'shape') {
+                const st = el.shapeType || 'shape';
+                name = SHAPE_NAMES[st] || (st.charAt(0).toUpperCase() + st.slice(1));
+            }
+            else if (el.type === 'path') name = 'Sketch';
+        }
+
+        return { dataUrl, thumbUrl, name };
+    }
+
+    /**
+     * Collect selected elements as reference image(s) for a panel instance.
+     * Renders the selection as one image and adds it as an inline chip with a short name.
      */
     function collectSelectedAsReference(instance, elements) {
+        const engine = window.canvasEngine;
         const { state, els } = instance;
-        // Remove previous auto-collected images from state, keep user-uploaded ones
-        state.uploadedImages = state.uploadedImages.filter(img => !img.fromSelection);
 
-        // Remove existing selection-based inline chips from editor (keep user-uploaded ones)
+        state.uploadedImages = state.uploadedImages.filter(img => !img.fromSelection);
         if (els.editor) {
             els.editor.querySelectorAll('.gen-inline-chip[data-from-selection]').forEach(c => c.remove());
         }
 
-        for (const el of elements) {
-            if (el.type === 'image' && el.image) {
-                try {
-                    const tempCanvas = document.createElement('canvas');
-                    const scale = Math.min(1, 1024 / Math.max(el.width, el.height));
-                    tempCanvas.width = Math.round(el.width * scale);
-                    tempCanvas.height = Math.round(el.height * scale);
-                    const ctx = tempCanvas.getContext('2d');
-                    ctx.drawImage(el.image, 0, 0, tempCanvas.width, tempCanvas.height);
-                    const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.85);
-
-                    // Create a small thumbnail for inline chip (smaller size)
-                    const thumbCanvas = document.createElement('canvas');
-                    const thumbSize = 64;
-                    const aspect = el.width / el.height;
-                    thumbCanvas.width = aspect >= 1 ? thumbSize : Math.round(thumbSize * aspect);
-                    thumbCanvas.height = aspect >= 1 ? Math.round(thumbSize / aspect) : thumbSize;
-                    const thumbCtx = thumbCanvas.getContext('2d');
-                    thumbCtx.drawImage(el.image, 0, 0, thumbCanvas.width, thumbCanvas.height);
-                    const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.7);
-
-                    const imgData = {
-                        chipId: nextChipId(),
-                        src: dataUrl,
-                        thumb: thumbUrl,
-                        name: 'image',
-                        fromSelection: true
-                    };
-                    state.uploadedImages.push(imgData);
-
-                    // Insert inline chip into editor
-                    if (els.editor) {
-                        insertInlineChip(instance, imgData, els.editor);
-                    }
-
-                    // Recognize the image asynchronously
-                    recognizeImageLabel(imgData, instance);
-                } catch (err) {
-                    console.warn('[canvas-gen] Failed to export selected image:', err);
-                }
+        // Don't add a chip for a single empty frame (no children inside it)
+        if (elements.length === 1 && elements[0].type === 'frame') {
+            const hasContent = engine.elements.some(el => el.parentFrame === elements[0]);
+            if (!hasContent) {
+                renderUploadedImages(instance);
+                updateSendState(instance);
+                return;
             }
         }
+
+        const result = renderSelectionToImage(elements, engine);
+        if (!result) return;
+
+        const imgData = {
+            chipId: nextChipId(),
+            src: result.dataUrl,
+            thumb: result.thumbUrl,
+            name: result.name,
+            fromSelection: true
+        };
+        state.uploadedImages.push(imgData);
+
+        if (els.editor) {
+            insertInlineChip(instance, imgData, els.editor);
+        }
+
+        if (elements.length === 1 && elements[0].type === 'image' && elements[0].image) {
+            recognizeImageLabel(imgData, instance);
+        }
+
         renderUploadedImages(instance);
         updateSendState(instance);
     }
@@ -371,10 +557,34 @@
 
         const label = document.createElement('span');
         label.className = 'gen-chip-label';
-        label.textContent = imgData.name || 'image';
+        const fullLabelText = imgData.name || 'image';
+        label.dataset.fullLabel = fullLabelText;
+        label.textContent = fullLabelText; // Always show full label
 
         chip.appendChild(thumb);
         chip.appendChild(label);
+
+        let previewEl = null;
+        chip.addEventListener('mouseenter', (e) => {
+            if (previewEl) return;
+            previewEl = document.createElement('div');
+            previewEl.className = 'gen-chip-preview';
+            const img = document.createElement('img');
+            img.src = imgData.src || imgData.thumb;
+            img.alt = imgData.name || '';
+            previewEl.appendChild(img);
+            document.body.appendChild(previewEl);
+            const rect = chip.getBoundingClientRect();
+            previewEl.style.left = rect.left + 'px';
+            previewEl.style.top = (rect.top - 8) + 'px';
+            previewEl.style.transform = 'translateY(-100%)';
+        });
+        chip.addEventListener('mouseleave', () => {
+            if (previewEl && previewEl.parentNode) {
+                previewEl.parentNode.removeChild(previewEl);
+                previewEl = null;
+            }
+        });
 
         const space = document.createTextNode('\u00A0');
 
@@ -430,7 +640,11 @@
             );
             if (chip) {
                 const chipLabel = chip.querySelector('.gen-chip-label');
-                if (chipLabel) chipLabel.textContent = labelText;
+                if (chipLabel) {
+                    chipLabel.dataset.fullLabel = labelText;
+                    // Always show full label
+                    chipLabel.textContent = labelText;
+                }
             }
         }
     }
@@ -460,9 +674,9 @@
             if (!text) return;
 
             // Take the first keyword as the label
-            const keywords = text.split(',').map(k => k.trim()).filter(Boolean);
-            const label = keywords[0] || 'image';
-            const labelText = label.charAt(0).toUpperCase() + label.slice(1);
+            const keywords = text.split(/[\s,]+/).map(k => k.trim()).filter(Boolean);
+            let labelText = keywords.slice(0, 2).join(' ').slice(0, 24) || 'Image';
+            labelText = labelText.charAt(0).toUpperCase() + labelText.slice(1);
 
             // Store in cache
             imageLabelCache.set(cacheKey, labelText);
@@ -477,6 +691,11 @@
 
     function bindPanelEvents(instance) {
         const { dom, els } = instance;
+
+        els.addBtn.title = 'Add reference image';
+        els.modelSelector.title = 'Model';
+        els.countSelector.title = 'Image count';
+        els.sendBtn.title = 'Send (Enter)';
 
         // Collapsed capsule click → expand
         els.collapsed.addEventListener('click', (e) => {
@@ -629,7 +848,7 @@
     }
 
     // No-op: all images are inline chips now
-    function renderUploadedImages() {}
+    function renderUploadedImages() { }
 
     // ==================== Model Picker ====================
     function toggleModelPicker(instance) {
@@ -847,6 +1066,23 @@
     // ==================== Layout Helpers ====================
 
     /**
+     * Ensure the shorter side is at least minSize (default 1080).
+     * This is a DEFAULT only — returns adjusted values without modifying originals.
+     * @param {number} w  - original width
+     * @param {number} h  - original height
+     * @param {number} [minSize=1080] - minimum value for the shorter side
+     * @returns {{ w: number, h: number }}
+     */
+    function ensureFrameMinSize(w, h, minSize = 1080) {
+        const shorter = Math.min(w, h);
+        if (shorter < minSize) {
+            const scale = minSize / shorter;
+            return { w: Math.round(w * scale), h: Math.round(h * scale) };
+        }
+        return { w: Math.round(w), h: Math.round(h) };
+    }
+
+    /**
      * Check if an element is visually inside a frame (>50% overlap by area).
      */
     function isElementInsideFrame(el, frame) {
@@ -908,11 +1144,19 @@
         };
 
         state.isGenerating = true;
-        showPanel(instance, 'thinking');
+        // Keep panel in collapsed state — loading is shown on the frame itself.
+        // Clear the editor so it looks ready for next prompt.
+        els.editor.textContent = '';
+        state.uploadedImages = [];
+        renderUploadedImages(instance);
+        showPanel(instance, 'collapsed');
 
         const abortController = new AbortController();
         state.abortController = abortController;
         els.sendBtn.disabled = true;
+
+        // Show a floating Cancel link near the generating frames
+        const cancelOverlay = showCancelOverlay(abortController);
 
         // Determine generation mode
         const sourceFrame = genContext.frame;
@@ -925,8 +1169,59 @@
                 isElementInsideFrame(el, sourceFrame))
         );
 
-        const refRect = sourceFrame || genContext.anchor;
+        let refRect = sourceFrame || genContext.anchor;
         const FRAME_GAP = 30;
+
+        if (!sourceFrame) {
+            // Use the already-captured prompt (editor may have been cleared by now)
+            const promptForRatio = prompt || '';
+            const ratioMatch = promptForRatio.match(/\b(\d+)\s*[:\uFF1A]\s*(\d+)\b/);
+            let w = 1080, h = 1080;
+            if (ratioMatch && parseInt(ratioMatch[1]) > 0 && parseInt(ratioMatch[2]) > 0) {
+                const rW = parseInt(ratioMatch[1]), rH = parseInt(ratioMatch[2]);
+                const ratio = rW / rH;
+                // Use 1080 as minimum base so the shorter side is always >= 1080
+                const base = 1080;
+                w = ratio >= 1 ? Math.round(base * ratio) : base;
+                h = ratio >= 1 ? base : Math.round(base / ratio);
+            } else {
+                const firstImg = selectedElements.find(el => el.type === 'image' && el.image);
+                if (firstImg && firstImg.image) {
+                    const nw = firstImg.image.naturalWidth || firstImg.width || 1080;
+                    const nh = firstImg.image.naturalHeight || firstImg.height || 1080;
+                    // Apply 1080 minimum on shorter side as default
+                    const sized = ensureFrameMinSize(nw, nh);
+                    w = sized.w;
+                    h = sized.h;
+                }
+            }
+            refRect = { x: genContext.anchor.x, y: genContext.anchor.y, width: w, height: h };
+        } else if (isReplaceMode && sourceFrame) {
+            // Replace mode: if user specified a ratio, compute new size based on source image's shortest side
+            const ratioMatch = prompt.match(/\b(\d+)\s*[:\uFF1A]\s*(\d+)\b/);
+            if (ratioMatch && parseInt(ratioMatch[1]) > 0 && parseInt(ratioMatch[2]) > 0) {
+                const rW = parseInt(ratioMatch[1]), rH = parseInt(ratioMatch[2]);
+                const userRatio = rW / rH;
+                // Find source image natural size inside the frame
+                const srcImg = engine.elements.find(el =>
+                    el.type === 'image' && el.parentFrame === sourceFrame && el.image
+                );
+                let base;
+                if (srcImg && srcImg.image) {
+                    // Use natural resolution: base = shorter side of original image
+                    base = Math.min(srcImg.image.naturalWidth, srcImg.image.naturalHeight);
+                } else {
+                    // Fallback: use frame's shorter side
+                    base = Math.min(sourceFrame.width, sourceFrame.height);
+                }
+                const newW = userRatio >= 1 ? Math.round(base * userRatio) : base;
+                const newH = userRatio >= 1 ? base : Math.round(base / userRatio);
+                // Update refRect and resize the source frame and any new frames to new size
+                refRect = { x: sourceFrame.x, y: sourceFrame.y, width: newW, height: newH };
+                sourceFrame.width = newW;
+                sourceFrame.height = newH;
+            }
+        }
 
         // --- PRE-CREATE placeholder frames for multi-image ---
         // Place new frames adjacent to source frame and push existing content
@@ -974,11 +1269,13 @@
                 targetSlots.push({ frame: f, isNew: true });
             }
         } else {
-            // No frame — create new frames in a row
-            const firstPos = engine.getNextGridPosition(refRect.width, refRect.height, FRAME_GAP);
+            // No frame — create new frames to the right of operated content (anchor)
+            const anchor = genContext.anchor;
+            const startX = anchor.x + (anchor.width || refRect.width) + FRAME_GAP;
+            const startY = anchor.y;
             for (let i = 0; i < genContext.imageCount; i++) {
-                const x = firstPos.x + (refRect.width + FRAME_GAP) * i;
-                const y = firstPos.y;
+                const x = startX + (refRect.width + FRAME_GAP) * i;
+                const y = startY;
                 const f = createEmptyFrame(engine, x, y, refRect.width, refRect.height, '#FFFFFF');
                 f._generating = true;
                 f._genStartTime = performance.now();
@@ -1003,7 +1300,7 @@
 
         // --- Resolution / quality: user-specified takes priority, else 2K default ---
         let imageSize = '2K';
-        if      (/\b4[kK]\b/.test(prompt)) imageSize = '4K';
+        if (/\b4[kK]\b/.test(prompt)) imageSize = '4K';
         else if (/\b2[kK]\b/.test(prompt)) imageSize = '2K';
         else if (/\b1[kK]\b/.test(prompt)) imageSize = '1K';
 
@@ -1035,7 +1332,7 @@
             }],
             generationConfig: {
                 responseModalities: ['TEXT', 'IMAGE'],
-                imageConfig: { 
+                imageConfig: {
                     aspectRatio,
                     imageSize
                 }
@@ -1109,11 +1406,18 @@
         } finally {
             state.isGenerating = false;
             state.abortController = null;
-            // Clear any remaining loading states
+            // Clear loading states and remove empty new frames (e.g. after cancel)
             targetSlots.forEach(s => {
                 s.frame._generating = false;
                 delete s.frame._genStartTime;
+                // Remove new frames that never received an image (cancelled or failed)
+                if (s.isNew && !engine.elements.some(el => el.parentFrame === s.frame && el.type === 'image')) {
+                    const idx = engine.elements.indexOf(s.frame);
+                    if (idx !== -1) engine.elements.splice(idx, 1);
+                }
             });
+            // Remove the cancel overlay
+            if (cancelOverlay && cancelOverlay.parentNode) cancelOverlay.remove();
             showPanel(instance, 'collapsed');
             updateSendState(instance);
             if (engine) engine.render();
@@ -1161,16 +1465,22 @@
         const iw = img.naturalWidth || img.width || 1;
         const ih = img.naturalHeight || img.height || 1;
         const imageAspect = iw / ih;
+        const imageLong = Math.max(iw, ih);
 
-        // Resize frame to match image aspect ratio (keep center, keep same "max side" in logical units)
+        // Scale frame logical size by actual resolution so 2K/4K images occupy more canvas space
+        const refPx = 2048;
+        const baseLogical = 800;
         const maxSide = Math.max(frame.width, frame.height);
+        const resolutionScale = Math.max(0.25, Math.min(4, imageLong / refPx));
+        const scaledMax = Math.max(maxSide, baseLogical * resolutionScale);
+
         let newW, newH;
         if (imageAspect >= 1) {
-            newW = maxSide;
-            newH = maxSide / imageAspect;
+            newW = scaledMax;
+            newH = scaledMax / imageAspect;
         } else {
-            newH = maxSide;
-            newW = maxSide * imageAspect;
+            newH = scaledMax;
+            newW = scaledMax * imageAspect;
         }
         const centerX = frame.x + frame.width / 2;
         const centerY = frame.y + frame.height / 2;
@@ -1189,7 +1499,17 @@
             src: dataUrl,
             parentFrame: frame
         };
-        engine.elements.push(imageElement);
+
+        // Insert image BEFORE any existing non-image children of this frame
+        // so that text/shapes/paths added to the frame remain visually on top of images.
+        const firstNonImageChildIndex = engine.elements.findIndex(
+            el => el.parentFrame === frame && el.type !== 'image'
+        );
+        if (firstNonImageChildIndex !== -1) {
+            engine.elements.splice(firstNonImageChildIndex, 0, imageElement);
+        } else {
+            engine.elements.push(imageElement);
+        }
 
         autoNameFrame(frame, dataUrl);
 
@@ -1309,6 +1629,16 @@
 
             if (selectedElements.length === 0) return;
 
+            const hasGeneratingFrame = selectedElements.some(el =>
+                el.type === 'frame' && el._generating
+            );
+            if (hasGeneratingFrame) {
+                for (const [, inst] of panelRegistry) {
+                    hidePanel(inst);
+                }
+                return;
+            }
+
             const key = currentKey;
             const instance = getOrCreatePanel(key);
             if (!instance) return;
@@ -1322,11 +1652,9 @@
             instance.state.selectedElements = [...selectedElements];
 
             if (selectedElements.length === 1 && frame) {
-                // Selected a Frame
                 instance.state.currentFrame = frame;
                 instance.state.currentAnchor = frame;
 
-                // Check if frame is empty (no child elements)
                 const hasContent = engine.elements.some(el => el.parentFrame === frame);
 
                 if (!hasContent) {
@@ -1336,12 +1664,12 @@
                     showPanel(instance, 'collapsed');
                 }
             } else {
-                // Selected non-frame content → collapsed state
                 instance.state.currentFrame = findParentFrame(selectedElements);
                 instance.state.currentAnchor = getSelectionBounds(selectedElements);
-                collectSelectedAsReference(instance, selectedElements);
                 showPanel(instance, 'collapsed');
             }
+
+            collectSelectedAsReference(instance, selectedElements);
         };
 
         // Chain into render loop for position updates on ALL visible panels
@@ -1351,7 +1679,7 @@
             for (const [key, inst] of panelRegistry) {
                 if (inst.state.panelMode !== 'hidden') {
                     // Recompute anchor from live element positions (for drag follow)
-                    if (inst.state.selectedElements && inst.state.selectedElements.length > 0 && !inst.state.isGenerating) {
+                    if (inst.state.selectedElements && inst.state.selectedElements.length > 0) {
                         const frame = inst.state.selectedElements.find(el => el.type === 'frame');
                         if (frame) {
                             inst.state.currentAnchor = frame;
@@ -1366,7 +1694,77 @@
             }
         };
 
+        // Expose global helper so canvas.js Tab shortcut can expand+focus the active panel
+        window.canvasGenFocusPanel = () => {
+            // Find the currently visible (non-hidden) panel, or the most recently active one
+            let target = null;
+            for (const [, inst] of panelRegistry) {
+                if (inst.state.panelMode !== 'hidden' && !inst.state.isGenerating) {
+                    target = inst;
+                    break;
+                }
+            }
+            if (!target) return;
+            showPanel(target, 'expanded');
+            autoFocusEditor(target);
+        };
+
         console.log('[canvas-gen] Multi-instance generation panel initialized');
+    }
+
+    // ==================== Cancel Overlay ====================
+
+    /**
+     * Show a floating "Cancel" text link that follows the generating frames.
+     * Returns the overlay DOM element so the caller can remove it when done.
+     */
+    function showCancelOverlay(abortController) {
+        const overlay = document.createElement('div');
+        overlay.className = 'gen-cancel-overlay';
+        overlay.textContent = 'Cancel';
+        overlay.addEventListener('click', () => {
+            abortController.abort();
+        });
+        document.body.appendChild(overlay);
+
+        // Keep the overlay positioned inside the first generating frame,
+        // near its bottom center (inset from the bottom edge).
+        const CANCEL_INSET_FROM_BOTTOM = 28; // px from bottom of frame in screen space
+        function positionOverlay() {
+            const engine = window.canvasEngine;
+            if (!engine || !overlay.parentNode) return;
+            const frames = engine.elements.filter(el => el._generating);
+            if (!frames.length) return;
+
+            // Use the first (primary) generating frame as the anchor
+            const f = frames[0];
+            const centerWorld = engine.worldToScreen(f.x + f.width / 2, f.y + f.height);
+            const rect = engine.canvas.getBoundingClientRect();
+            const centerX = rect.left + centerWorld.x;
+            // Position inside the frame: bottom of frame minus inset
+            const insideY = rect.top + centerWorld.y - CANCEL_INSET_FROM_BOTTOM;
+
+            overlay.style.left = centerX + 'px';
+            overlay.style.top = insideY + 'px';
+        }
+
+        // Animate position updates while overlay is alive
+        let raf;
+        function tick() {
+            if (!overlay.parentNode) return;
+            positionOverlay();
+            raf = requestAnimationFrame(tick);
+        }
+        raf = requestAnimationFrame(tick);
+
+        // Store raf so we can cancel it when overlay is removed
+        const origRemove = overlay.remove.bind(overlay);
+        overlay.remove = () => {
+            cancelAnimationFrame(raf);
+            origRemove();
+        };
+
+        return overlay;
     }
 
     // ==================== Frame Loading Animation ====================
@@ -1407,7 +1805,7 @@
 
             // Place a 1:1 square Frame at the viewport centre
             const FRAME_SIZE = 800; // logical canvas units
-            const cx = (window.innerWidth  / 2 - engine.viewport.x) / engine.viewport.scale;
+            const cx = (window.innerWidth / 2 - engine.viewport.x) / engine.viewport.scale;
             const cy = (window.innerHeight / 2 - engine.viewport.y) / engine.viewport.scale;
             const frame = createEmptyFrame(engine, cx - FRAME_SIZE / 2, cy - FRAME_SIZE / 2, FRAME_SIZE, FRAME_SIZE, '#FFFFFF');
             engine.render();
@@ -1417,7 +1815,7 @@
 
             // Give the panel one animation frame to initialise, then set prompt + fire
             requestAnimationFrame(() => {
-                const key      = getPanelKey([frame]);
+                const key = getPanelKey([frame]);
                 const instance = panelRegistry.get(key);
                 if (!instance) return;
 
