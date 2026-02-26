@@ -9,24 +9,21 @@
 // Note: Supabase anon keys are safe to commit — they are public-facing by design
 //       and only have access controlled by Row Level Security (RLS) policies.
 
-const SUPABASE_URL = 'https://lfluatmojhkzdywizmsm.supabase.co';
+import { supabase as _supabaseClient } from './src/db/supabase.js';
+
+const SUPABASE_URL      = 'https://lfluatmojhkzdywizmsm.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxmbHVhdG1vamhremR5d2l6bXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE0MzM1NDksImV4cCI6MjA4NzAwOTU0OX0.ivjN5x7ZNU8RXsTBLuA_oxBKHCPcRxStagyRAwrgy9w';
 
 // ==================== Supabase Client ====================
-let _supabase = null;
 
 function getSupabaseClient() {
-    if (_supabase) return _supabase;
-    if (typeof supabase === 'undefined' || !supabase.createClient) {
-        throw new Error('Supabase SDK not loaded');
-    }
-    _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    return _supabase;
+    return _supabaseClient;
 }
 
 function isConfigured() {
-    return SUPABASE_URL !== 'YOUR_SUPABASE_PROJECT_URL' &&
-           SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY';
+    // True as long as the constants hold real (non-placeholder) values
+    return SUPABASE_URL.startsWith('https://') &&
+           SUPABASE_ANON_KEY.length > 20;
 }
 
 // ==================== Cross-tab Broadcast ====================
@@ -219,3 +216,18 @@ async function getCurrentUser() {
         return null;
     }
 }
+
+// ==================== Global Exports (window bridge for legacy modules) ====================
+// Each file runs in its own ES module scope when bundled with Vite.
+// Exposing auth functions on window allows canvas.js / script.js to call them
+// without requiring full ES module refactoring of those files.
+window.getSupabaseClient    = getSupabaseClient;
+window.getCurrentUser       = getCurrentUser;
+window.signOut              = signOut;
+window.onAuthStateChange    = onAuthStateChange;
+window.sendEmailOTP         = sendEmailOTP;
+window.verifyEmailOTP       = verifyEmailOTP;
+window.signInWithGoogle     = signInWithGoogle;
+window.signInWithApple      = signInWithApple;
+window.broadcastAuthChange  = broadcastAuthChange;
+window.listenForAuthBroadcast = listenForAuthBroadcast;

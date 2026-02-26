@@ -104,16 +104,38 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==================== Auth + Project Load ====================
     // getSession() reads from local storage (no network round-trip), so auth
     // resolution is fast and does not delay the initial canvas render.
+    // Expose getProjectName for CollabManager snapshot saves
+    window.getProjectName = getProjectName;
+
     (async () => {
         // Resolve auth first (uses local session cache — very fast)
+        let _currentUser = null;
         if (typeof getCurrentUser === 'function') {
             try {
-                const user = await getCurrentUser();
-                if (user?.id) await ProjectManager.setUserId(user.id);
+                _currentUser = await getCurrentUser();
+                if (_currentUser?.id) await ProjectManager.setUserId(_currentUser.id);
             } catch { }
         }
 
-        // Load project from IndexedDB (images awaited inside deserializeElements)
+        // Handle share link token (Phase 4) — check before project load
+        const shareToken = urlParams.get('share');
+        if (shareToken) {
+            try {
+                const res = await fetch(`/api/share?token=${encodeURIComponent(shareToken)}`);
+                const data = await res.json();
+                if (data.valid && data.role === 'viewer') {
+                    window.CollabManager?.setViewOnly(true);
+                    // Show view-only banner
+                    const banner = document.createElement('div');
+                    banner.id = 'view-only-banner';
+                    banner.style.cssText = 'position:fixed;top:44px;left:50%;transform:translateX(-50%);z-index:9999;background:#1e293b;color:#94a3b8;font-size:12px;padding:5px 14px;border-radius:0 0 8px 8px;pointer-events:none;';
+                    banner.textContent = 'View only — you cannot edit this project';
+                    document.body.appendChild(banner);
+                }
+            } catch { /* ignore share validation errors */ }
+        }
+
+        // Load project (cloud or IndexedDB)
         await initProject();
 
         // Resume any generation that was interrupted by a page refresh
@@ -150,6 +172,72 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        // ── Phase 5: Start real-time collaboration ─────────────────────────────
+        if (_currentUser?.id && window.CollabManager) {
+            const meta = _currentUser.user_metadata || {};
+            window.CollabManager.connect(
+                projectId, engine,
+                _currentUser.id,
+                meta.full_name || meta.name || _currentUser.email,
+                meta.avatar_url || null
+            ).catch(e => console.warn('[Canvas] Collab connect failed:', e));
+        }
+
+        // ── Phase 5: Broadcast canvas operations ─────────────────────────────
+        // Wrap engine.saveState to capture element diffs and broadcast to peers.
+        const _origSaveState2 = engine.saveState.bind(engine);
+        engine.saveState = function (...args) {
+            if (!window.CollabManager?.isConnected()) { _origSaveState2(...args); return; }
+
+            // Snapshot IDs + positions BEFORE the state save
+            const prevIds    = new Set(engine.elements.map(e => e.id));
+            const prevStates = {};
+            engine.elements.forEach(e => {
+                prevStates[e.id] = {
+                    x: e.x, y: e.y, width: e.width, height: e.height,
+                    rotation: e.rotation, src: e.src, text: e.text,
+                };
+            });
+
+            _origSaveState2(...args);
+
+            // Broadcast diffs AFTER the state save
+            const now = Date.now();
+            engine.elements.forEach(el => {
+                if (!prevIds.has(el.id)) {
+                    const { image, ...elData } = el;
+                    window.CollabManager.broadcastOp('element_add', { element: { ...elData, _v: now } });
+                } else {
+                    const prev = prevStates[el.id];
+                    if (prev && (el.x !== prev.x || el.y !== prev.y ||
+                        el.width !== prev.width || el.height !== prev.height ||
+                        el.rotation !== prev.rotation || el.src !== prev.src || el.text !== prev.text)) {
+                        window.CollabManager.broadcastOp('element_update', {
+                            elementId: el.id,
+                            changes: {
+                                x: el.x, y: el.y, width: el.width, height: el.height,
+                                rotation: el.rotation, src: el.src, text: el.text, _v: now,
+                            },
+                        });
+                    }
+                }
+            });
+            prevIds.forEach(id => {
+                if (!engine.elements.find(e => e.id === id)) {
+                    window.CollabManager.broadcastOp('element_delete', { elementId: id });
+                }
+            });
+        };
+
+        // ── Phase 5: Broadcast cursor position on mouse move ───────────────────
+        canvas.addEventListener('mousemove', (e) => {
+            if (!window.CollabManager?.isConnected()) return;
+            const rect = canvas.getBoundingClientRect();
+            const worldX = (e.clientX - rect.left - engine.viewport.x) / engine.viewport.scale;
+            const worldY = (e.clientY - rect.top  - engine.viewport.y) / engine.viewport.scale;
+            window.CollabManager.broadcastCursor(worldX, worldY);
+        }, { passive: true });
+
         // After project loaded, sync ongoing auth state changes
         if (typeof onAuthStateChange === 'function') {
             onAuthStateChange(({ loggedIn, user }) => {
@@ -158,6 +246,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     ProjectManager.setUserId(newId);
                 }
                 updateCanvasAuthUI(loggedIn, user || null);
+                // Reconnect collab when user changes
+                if (loggedIn && user?.id && window.CollabManager) {
+                    const meta = user.user_metadata || {};
+                    window.CollabManager.connect(
+                        projectId, engine, user.id,
+                        meta.full_name || meta.name || user.email,
+                        meta.avatar_url || null
+                    ).catch(() => {});
+                } else if (!loggedIn) {
+                    window.CollabManager?.disconnect();
+                }
             });
         }
 
@@ -284,10 +383,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const recentItem = document.getElementById('recent-projects-item');
     const recentSubmenu = document.getElementById('recent-projects-submenu');
     if (recentItem && recentSubmenu) {
-        recentItem.addEventListener('mouseenter', () => {
-            const projects = (typeof ProjectManager !== 'undefined')
-                ? ProjectManager.getAll().slice(0, 5)
-                : [];
+        recentItem.addEventListener('mouseenter', async () => {
+            let projects = [];
+            if (typeof ProjectManager !== 'undefined') {
+                try { projects = (await ProjectManager.getAll()).slice(0, 5); } catch { }
+            }
             if (projects.length === 0) {
                 recentSubmenu.innerHTML = '<div class="recent-submenu-empty">No recent projects</div>';
             } else {
@@ -693,6 +793,39 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (window._updateZoomDisplay) window._updateZoomDisplay();
             }
         }
+    });
+
+    // ── Phase 4: Share button ──────────────────────────────────────────────────
+    const shareBtn = document.getElementById('share-btn');
+    if (shareBtn) {
+        shareBtn.addEventListener('click', () => {
+            if (window.ShareManager) {
+                window.ShareManager.openShareModal(projectId);
+            } else {
+                alert('Share feature loading…');
+            }
+        });
+    }
+
+    // ── Phase 3: Profile & Team menu items in avatar dropdown ─────────────────
+    const profileMenuItem = document.getElementById('avatar-profile-btn');
+    if (profileMenuItem) {
+        profileMenuItem.addEventListener('click', () => {
+            document.getElementById('avatar-dropdown')?.classList.remove('open');
+            window.TeamManager?.openProfileModal();
+        });
+    }
+    const teamMenuItem = document.getElementById('avatar-team-btn');
+    if (teamMenuItem) {
+        teamMenuItem.addEventListener('click', () => {
+            document.getElementById('avatar-dropdown')?.classList.remove('open');
+            window.TeamManager?.openTeamModal();
+        });
+    }
+
+    // Disconnect collab gracefully on unload
+    window.addEventListener('beforeunload', () => {
+        window.CollabManager?.disconnect();
     });
 
     // Make engine globally accessible for debugging

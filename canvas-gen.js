@@ -1886,6 +1886,26 @@
         autoNameFrame(frame, dataUrl);
 
         if (typeof engine.saveState === 'function') engine.saveState();
+
+        // Phase 2: Upload generated image to Supabase Storage (replace base64 with permanent URL)
+        // Runs asynchronously in background — canvas is already updated with base64 immediately.
+        if (window.AssetManager && dataUrl && dataUrl.startsWith('data:')) {
+            const _imgEl = imageElement;
+            const _pid   = new URLSearchParams(window.location.search).get('id');
+            if (_pid) {
+                window.AssetManager.uploadDataUrl(_pid, dataUrl, 'image/png').then(url => {
+                    if (!url || !_imgEl) return;
+                    _imgEl.src = url;
+                    const newImg = new Image();
+                    newImg.crossOrigin = 'anonymous';
+                    newImg.onload = () => {
+                        _imgEl.image = newImg;
+                        if (window.canvasEngine) window.canvasEngine.render();
+                    };
+                    newImg.src = url;
+                }).catch(() => { /* keep base64 on upload failure */ });
+            }
+        }
     }
 
     function loadImageFromData(dataUrl) {

@@ -1,5 +1,6 @@
 .DS_Store
 node_modules/
+dist/
 __pycache__/
 *.pyc
 *.log
@@ -8,4 +9,5 @@ server.log
 server.pid
 .wrangler/
 .env
+.dev.vars
 auth.local.js
