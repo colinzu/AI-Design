@@ -206,12 +206,15 @@ async function signOut() {
 }
 
 // ==================== Get Current User ====================
+// Uses getSession() which reads from local storage — no network round-trip.
+// getUser() (the old implementation) sends a JWT validation request to Supabase
+// on every page load, adding hundreds of milliseconds to initial render.
 async function getCurrentUser() {
     if (!isConfigured()) return null;
     try {
         const client = getSupabaseClient();
-        const { data: { user } } = await client.auth.getUser();
-        return user;
+        const { data: { session } } = await client.auth.getSession();
+        return session?.user ?? null;
     } catch (e) {
         return null;
     }

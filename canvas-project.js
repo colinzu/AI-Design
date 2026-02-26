@@ -56,6 +56,9 @@
             for (const key of Object.keys(el)) {
                 if (key === 'image') continue;        // HTMLImageElement — not serializable
                 if (key === 'parentFrame') continue;  // live reference — handled below
+                if (key === '_generating') continue;
+                if (key === '_genStartTime') continue;
+                if (key === '_justCreated') continue;
                 out[key] = el[key];
             }
             if (el.type === 'frame') out._fid  = frameId.get(el);
@@ -84,17 +87,41 @@
             }
         });
 
-        await Promise.all(elements.map(el => {
-            if (el.type === 'image' && el.src) {
-                return new Promise(resolve => {
-                    const img = new Image();
-                    img.onload  = () => { el.image = img; resolve(); };
-                    img.onerror = () => resolve();
-                    img.src = el.src;
-                });
-            }
-            return Promise.resolve();
-        }));
+        // Start loading all images. For data: URLs (base64) this is near-instant.
+        // We return elements immediately so frames/shapes render right away,
+        // then each image triggers a repaint when decoded.
+        // Batch repaints with rAF so we don't re-render for every single image.
+        let pendingRender = false;
+        function scheduleRender() {
+            if (pendingRender) return;
+            pendingRender = true;
+            requestAnimationFrame(() => {
+                pendingRender = false;
+                if (window.canvasEngine) window.canvasEngine.render();
+            });
+        }
+
+        const imageEls = elements.filter(el => el.type === 'image' && el.src);
+        if (imageEls.length > 0) {
+            // Await first image so initial render already has at least one image
+            // (avoids blank-frame flash for projects with a single image).
+            const firstImg = imageEls[0];
+            await new Promise(resolve => {
+                const img = new Image();
+                if (!firstImg.src.startsWith('data:')) img.crossOrigin = 'anonymous';
+                img.onload  = () => { firstImg.image = img; resolve(); };
+                img.onerror = () => resolve();
+                img.src = firstImg.src;
+            });
+            // Load remaining images in background
+            imageEls.slice(1).forEach(el => {
+                const img = new Image();
+                if (!el.src.startsWith('data:')) img.crossOrigin = 'anonymous';
+                img.onload  = () => { el.image = img; scheduleRender(); };
+                img.onerror = () => {};
+                img.src = el.src;
+            });
+        }
 
         return elements;
     }
@@ -206,6 +233,10 @@
 
     window.ProjectManager = {
 
+        // Expose deserializeElements so canvas.js can use it for the sessionStorage
+        // emergency recovery path without duplicating the implementation.
+        _deserializeElements: deserializeElements,
+
         async getAll() {
             return readAll();
         },
@@ -215,14 +246,6 @@
             return all.find(p => p.id === id) ?? null;
         },
 
-        /**
-         * Save a project with thumbnail regeneration.
-         * @param {string} id
-         * @param {string} name
-         * @param {Array}  elements  - live canvas elements (not serialized)
-         * @param {object} viewport  - {x, y, scale}
-         * @param {HTMLCanvasElement} [canvasEl] - for shape/brush thumbnail fallback
-         */
         async save(id, name, elements, viewport, canvasEl) {
             // Thumbnail: last image element, then canvas screenshot fallback
             let thumbnail = null;
@@ -251,12 +274,11 @@
             return writeAll(updated);
         },
 
-        /**
-         * Fire-and-forget save for beforeunload — reuses existing thumbnail.
-         * IndexedDB writes are async; modern browsers typically complete them
-         * even when initiated from beforeunload.
-         */
         saveAndForget(id, name, elements, viewport) {
+            // Fire-and-forget async IndexedDB write. Best-effort — the primary save
+            // path is the visibilitychange handler in canvas.js which fires early
+            // enough for async writes to complete. This is only a fallback for cases
+            // where visibilitychange doesn't fire (e.g. process kill, hard crash).
             readAll().then(all => {
                 const existing  = all.find(p => p.id === id);
                 const frameCount = elements.filter(el => el.type === 'frame').length;
@@ -311,7 +333,6 @@
                 try {
                     const savedUserId = _userId;
 
-                    // Read guest projects
                     _userId = 'guest';
                     const guestProjects = await readAll();
                     _userId = savedUserId;
@@ -326,7 +347,6 @@
                         if (merged.length > MAX_PROJECTS) merged.splice(MAX_PROJECTS);
                         await writeAll(merged);
 
-                        // Clear guest storage
                         _userId = 'guest';
                         const db = await openDB();
                         await new Promise(resolve => {

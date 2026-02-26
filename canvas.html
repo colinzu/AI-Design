@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="description" content="AI Design - Infinite Canvas">
     <title>Untitled Project - AI Design</title>
     <link rel="icon" href="assets/images/logo.png" type="image/png">
@@ -171,6 +171,26 @@
             <img src="assets/images/Layers.svg" alt="">
         </button>
     </aside>
+
+    <!-- Layers Panel -->
+    <div id="layers-panel" class="layers-panel hidden">
+        <div class="layers-header">
+            <span class="layers-title">Layers</span>
+            <button class="layers-collapse-btn" id="layers-collapse-btn" title="Close">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                    <line x1="9" y1="3" x2="9" y2="21"/>
+                </svg>
+            </button>
+        </div>
+        <div class="layers-search-wrap">
+            <svg class="layers-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input id="layers-search" class="layers-search-input" type="text" placeholder="Search layers…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="layers-list" id="layers-list"></div>
+    </div>
 
     <!-- Inspiration Panel (Floating, next to left sidebar) -->
     <div id="inspiration-panel" class="inspiration-panel hidden">
@@ -342,18 +362,23 @@
     <!-- Shape Selector Menu -->
     <div class="shape-menu hidden" id="shape-menu">
         <button class="menu-item" data-shape="rectangle">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1.2" stroke="currentColor" stroke-width="1.5"/></svg>
             <span>Rectangle</span>
         </button>
         <button class="menu-item" data-shape="ellipse">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><ellipse cx="8" cy="8" rx="6" ry="6" stroke="currentColor" stroke-width="1.5"/></svg>
             <span>Circle</span>
         </button>
         <button class="menu-item" data-shape="triangle">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2L14.5 14H1.5L8 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
             <span>Triangle</span>
         </button>
         <button class="menu-item" data-shape="star">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2l1.6 4 4.4.3-3.2 2.8 1 4.3L8 11.2l-3.8 2.2 1-4.3L2 6.3l4.4-.3z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
             <span>Star</span>
         </button>
         <button class="menu-item" data-shape="line">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><line x1="2.5" y1="13.5" x2="13.5" y2="2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             <span>Line</span>
         </button>
     </div>
@@ -401,21 +426,8 @@
         <div class="gen-panel hidden">
             <!-- Collapsed state: same capsule as thinking -->
             <div class="gen-collapsed">
-                <svg class="gen-sparkle" width="18" height="18" viewBox="0 0 24 24" fill="none">
-                    <path d="M12 2C12 2 13.5 8.5 12 12C10.5 8.5 12 2 12 2Z M12 22C12 22 10.5 15.5 12 12C13.5 15.5 12 22 12 22Z M2 12C2 12 8.5 10.5 12 12C8.5 13.5 2 12 2 12Z M22 12C22 12 15.5 13.5 12 12C15.5 10.5 22 12 22 12Z"
-                        fill="url(#sparkle-grad-col)" />
-                    <circle cx="5" cy="5" r="1.2" fill="url(#sparkle-grad-col)" opacity="0.8" />
-                    <circle cx="19" cy="5" r="0.9" fill="url(#sparkle-grad-col)" opacity="0.6" />
-                    <circle cx="5" cy="19" r="0.9" fill="url(#sparkle-grad-col)" opacity="0.6" />
-                    <circle cx="19" cy="19" r="1.2" fill="url(#sparkle-grad-col)" opacity="0.8" />
-                    <defs>
-                        <linearGradient id="sparkle-grad-col" x1="2" y1="2" x2="22" y2="22">
-                            <stop stop-color="#00D4D4" />
-                            <stop offset="1" stop-color="#0077EE" />
-                        </linearGradient>
-                    </defs>
-                </svg>
-                <span>Enter anything</span>
+                <img src="assets/images/AI_Logo.svg" class="gen-ai-logo" width="18" height="18" alt="AI">
+                <span><kbd>Tab</kbd> to edit</span>
             </div>
 
             <!-- Expanded state: full input panel -->
@@ -479,20 +491,7 @@
 
             <!-- Thinking state: same capsule with different content -->
             <div class="gen-thinking">
-                <svg class="gen-sparkle gen-sparkle-spin" width="18" height="18" viewBox="0 0 24 24" fill="none">
-                    <path d="M12 2C12 2 13.5 8.5 12 12C10.5 8.5 12 2 12 2Z M12 22C12 22 10.5 15.5 12 12C13.5 15.5 12 22 12 22Z M2 12C2 12 8.5 10.5 12 12C8.5 13.5 2 12 2 12Z M22 12C22 12 15.5 13.5 12 12C15.5 10.5 22 12 22 12Z"
-                        fill="url(#sparkle-grad-think)" />
-                    <circle cx="5" cy="5" r="1.2" fill="url(#sparkle-grad-think)" opacity="0.8" />
-                    <circle cx="19" cy="5" r="0.9" fill="url(#sparkle-grad-think)" opacity="0.6" />
-                    <circle cx="5" cy="19" r="0.9" fill="url(#sparkle-grad-think)" opacity="0.6" />
-                    <circle cx="19" cy="19" r="1.2" fill="url(#sparkle-grad-think)" opacity="0.8" />
-                    <defs>
-                        <linearGradient id="sparkle-grad-think" x1="2" y1="2" x2="22" y2="22">
-                            <stop stop-color="#00D4D4" />
-                            <stop offset="1" stop-color="#0077EE" />
-                        </linearGradient>
-                    </defs>
-                </svg>
+                <img src="assets/images/AI_Logo.svg" class="gen-ai-logo gen-sparkle-spin" width="18" height="18" alt="AI">
                 <span class="gen-thinking-text">Thinking...</span>
                 <button class="gen-stop-btn" title="Stop generation">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
@@ -534,7 +533,7 @@
         </div>
 
         <button class="agent-trigger-btn" id="agent-trigger-btn">
-            <span style="color: #4285F4; font-weight: bold; font-size: 16px;">✦</span>
+            <img src="assets/images/AI_Logo.svg" width="18" height="18" alt="AI" style="display:block;">
             Chat with Agent
         </button>
     </aside>
@@ -604,6 +603,7 @@
     <script src="canvas.js"></script>
     <script src="canvas-gen.js"></script>
     <script src="canvas-inspiration.js"></script>
+    <script src="canvas-layers.js"></script>
 </body>
 
 </html>

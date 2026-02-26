@@ -11,11 +11,49 @@
  */
 
 (function () {
+    // ==================== Generation State Persistence ====================
+    const GEN_STATE_PREFIX = 'aime_gen_';
+
+    function saveGenState(projectId, data) {
+        try { localStorage.setItem(GEN_STATE_PREFIX + projectId, JSON.stringify(data)); } catch {}
+    }
+
+    function loadGenState(projectId) {
+        try {
+            const raw = localStorage.getItem(GEN_STATE_PREFIX + projectId);
+            if (!raw) return null;
+            const s = JSON.parse(raw);
+            // Discard state older than 10 minutes to avoid stale restores
+            if (Date.now() - (s.timestamp || 0) > 10 * 60 * 1000) {
+                localStorage.removeItem(GEN_STATE_PREFIX + projectId);
+                return null;
+            }
+            return s;
+        } catch { return null; }
+    }
+
+    function clearGenState(projectId) {
+        try { localStorage.removeItem(GEN_STATE_PREFIX + projectId); } catch {}
+    }
+
     // ==================== Global Registry ====================
     const panelRegistry = new Map(); // key → PanelInstance
 
     // Cache recognized image labels: image src hash → label string
+    // Persisted to localStorage so labels survive refreshes.
+    const _LABEL_CACHE_KEY = 'canvas_image_labels';
     const imageLabelCache = new Map();
+    try {
+        const saved = JSON.parse(localStorage.getItem(_LABEL_CACHE_KEY) || '{}');
+        Object.entries(saved).forEach(([k, v]) => imageLabelCache.set(k, v));
+    } catch (_) {}
+    function _persistLabelCache() {
+        try {
+            const obj = {};
+            imageLabelCache.forEach((v, k) => { obj[k] = v; });
+            localStorage.setItem(_LABEL_CACHE_KEY, JSON.stringify(obj));
+        } catch (_) {}
+    }
 
     // Unique ID counter for inline chips
     let _chipIdCounter = 0;
@@ -242,18 +280,15 @@
 
     function autoFocusEditor(instance) {
         const { els } = instance;
-        if (els.editor) {
-            requestAnimationFrame(() => {
-                els.editor.focus();
-                // Place cursor at the end (after inline chips)
-                const sel = window.getSelection();
-                const range = document.createRange();
-                range.selectNodeContents(els.editor);
-                range.collapse(false); // collapse to end
-                sel.removeAllRanges();
-                sel.addRange(range);
-            });
-        }
+        if (!els.editor) return;
+        // Focus synchronously to preserve user-gesture context (needed for Tab key etc.)
+        els.editor.focus();
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(els.editor);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
     }
 
     // ==================== Selection Helpers ====================
@@ -316,12 +351,18 @@
             }
         }
 
-        // Use the full element set (including frame children) for accurate bounds
-        const bounds = getSelectionBounds(toRender);
+        // Always use only the directly-selected elements for bounds — never the expanded
+        // toRender list which includes frame children that may overflow the frame rect.
+        // Those overflow pixels would appear as transparent (black in JPEG) because the
+        // frame clips them during rendering.  The canvas must be exactly the union of the
+        // selected elements' own rects; frame children are clipped to the frame anyway.
+        const bounds = getSelectionBounds(elements);
         const w = Math.max(1, bounds.width);
         const h = Math.max(1, bounds.height);
-        // Cap at 2048px on the longest side — no lossy downscale below 1024
-        const maxPx = 2048;
+        // Cap at 768px on the longest side — sufficient for Gemini context understanding,
+        // keeps the base64 payload small (fast upload) and the synchronous canvas draw fast
+        // (smaller canvas = less CPU time = chip appears sooner after Tab).
+        const maxPx = 768;
         const scale = Math.min(1, maxPx / Math.max(w, h));
         const outW = Math.max(1, Math.round(w * scale));
         const outH = Math.max(1, Math.round(h * scale));
@@ -334,6 +375,24 @@
         const ctx = tempCanvas.getContext('2d');
         if (!ctx) return null;
 
+        // Fill white so any transparent / un-drawn regions appear white in JPEG output,
+        // not black (JPEG has no alpha channel — transparent = black).
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, outW, outH);
+
+        // Build a map of frame screen-space rects so child clipping is fast
+        const frameScreenRect = new Map();
+        for (const el of toRender) {
+            if (el.type === 'frame') {
+                frameScreenRect.set(el, {
+                    sx: (el.x - bounds.x) * scaleX,
+                    sy: (el.y - bounds.y) * scaleY,
+                    sw: el.width * scaleX,
+                    sh: el.height * scaleY,
+                });
+            }
+        }
+
         for (const el of toRender) {
             const localX = el.x - bounds.x;
             const localY = el.y - bounds.y;
@@ -343,6 +402,14 @@
             const sh = (el.height || 0) * scaleY;
 
             ctx.save();
+
+            // Clip frame children to the frame's screen rect so overflow doesn't bleed
+            if (el.parentFrame && frameScreenRect.has(el.parentFrame)) {
+                const fr = frameScreenRect.get(el.parentFrame);
+                ctx.beginPath();
+                ctx.rect(fr.sx, fr.sy, fr.sw, fr.sh);
+                ctx.clip();
+            }
 
             if (el.type === 'frame') {
                 ctx.fillStyle = el.fill || '#fff';
@@ -421,8 +488,15 @@
             ctx.restore();
         }
 
-        // Always export as PNG — no black background, full fidelity, no JPEG artefacts.
-        const dataUrl = tempCanvas.toDataURL('image/png');
+        // Export as JPEG for a compact payload — the reference image is used for AI context,
+        // not for display, so lossy compression is fine. JPEG is 5-10x smaller than PNG at the
+        // same resolution, which is the biggest lever for upload speed.
+        let dataUrl;
+        try {
+            dataUrl = tempCanvas.toDataURL('image/jpeg', 0.85);
+        } catch (_e) {
+            return null;
+        }
 
         const thumbSize = 64;
         let thumbUrl;
@@ -469,17 +543,37 @@
             line: 'Line',
         };
 
+        // Compute name mirroring the layer panel's getLabel() priority:
+        // el.name → AI cache (images) → type-based label
         let name = 'Selection';
         if (elements.length === 1) {
             const el = elements[0];
-            if (el.type === 'frame') name = (el.name || 'Frame').split(/\s+/).slice(0, 2).join(' ');
-            else if (el.type === 'image') name = 'Image';
-            else if (el.type === 'text') name = 'Text';
-            else if (el.type === 'shape') {
+            if (el.name) {
+                // User-assigned name always wins
+                name = el.name.split(/\s+/).slice(0, 3).join(' ');
+            } else if (el.type === 'frame') {
+                name = 'Frame';
+            } else if (el.type === 'image') {
+                // AI cache → frame name → fallback
+                const cached = el.src ? imageLabelCache.get(getImageCacheKey(el.src)) : null;
+                const frameName = el.parentFrame?.name;
+                if (cached) {
+                    name = cached.split(/\s+/).slice(0, 3).join(' ');
+                } else if (frameName && frameName !== 'Frame') {
+                    name = frameName.split(/\s+/).slice(0, 2).join(' ');
+                    // Pre-populate cache with frame name so recognizeImageLabel can skip the API call
+                    if (el.src) imageLabelCache.set(getImageCacheKey(el.src), frameName);
+                } else {
+                    name = 'Image';
+                }
+            } else if (el.type === 'text') {
+                name = (el.text || '').slice(0, 24).trim() || 'Text';
+            } else if (el.type === 'shape') {
                 const st = el.shapeType || 'shape';
                 name = SHAPE_NAMES[st] || (st.charAt(0).toUpperCase() + st.slice(1));
+            } else if (el.type === 'path') {
+                name = 'Sketch';
             }
-            else if (el.type === 'path') name = 'Sketch';
         }
 
         return { dataUrl, thumbUrl, name };
@@ -508,28 +602,172 @@
             }
         }
 
-        const result = renderSelectionToImage(elements, engine);
-        if (!result) return;
-
-        const imgData = {
-            chipId: nextChipId(),
-            src: result.dataUrl,
-            thumb: result.thumbUrl,
-            name: result.name,
-            fromSelection: true
-        };
-        state.uploadedImages.push(imgData);
-
-        if (els.editor) {
-            insertInlineChip(instance, imgData, els.editor);
+        // Ensure all image elements are fully loaded before rendering
+        const pendingImages = [];
+        const toRender = [];
+        for (const el of elements) {
+            if (el.type === 'frame') {
+                toRender.push(el);
+                const children = engine.getFrameChildren ? engine.getFrameChildren(el) : [];
+                children.forEach(c => toRender.push(c));
+            } else {
+                toRender.push(el);
+            }
+        }
+        for (const el of toRender) {
+            if (el.type === 'image' && el.src && (!el.image || !el.image.naturalWidth)) {
+                pendingImages.push(el);
+            }
         }
 
+        if (pendingImages.length > 0) {
+            Promise.all(pendingImages.map(el => new Promise(resolve => {
+                if (el.image && el.image.naturalWidth) { resolve(); return; }
+                const img = el.image || new Image();
+                if (!el.src.startsWith('data:')) img.crossOrigin = 'anonymous';
+                img.onload = () => { el.image = img; resolve(); };
+                img.onerror = () => resolve();
+                if (!el.image) {
+                    img.src = el.src;
+                } else if (el.image.complete) {
+                    resolve();
+                }
+            }))).then(() => {
+                doCollect(instance, elements);
+            });
+            return;
+        }
+
+        doCollect(instance, elements);
+    }
+
+    function doCollect(instance, elements) {
+        const engine = window.canvasEngine;
+        const { state, els } = instance;
+
+        // ── Step 1: fast synchronous thumbnail for the chip ───────────────────────
+        // For a single already-loaded image element we can build a 64px thumb
+        // directly from el.image without an expensive canvas redraw at 768px.
+        // This makes the chip appear immediately (no perceptible delay).
+        let fastThumb = null;
+        let fastName  = null;
         if (elements.length === 1 && elements[0].type === 'image' && elements[0].image) {
-            recognizeImageLabel(imgData, instance);
+            const el  = elements[0];
+            const img = el.image;
+            const THUMB = 64;
+            // If the image lives inside a frame, crop to the frame's visible area
+            const frame = el.parentFrame;
+            let visW, visH, srcX, srcY, srcW, srcH;
+            if (frame && el.width > 0 && el.height > 0) {
+                // Intersection of image rect and frame rect in canvas space
+                const clipX = Math.max(el.x, frame.x);
+                const clipY = Math.max(el.y, frame.y);
+                const clipR = Math.min(el.x + el.width,  frame.x + frame.width);
+                const clipB = Math.min(el.y + el.height, frame.y + frame.height);
+                visW = Math.max(1, clipR - clipX);
+                visH = Math.max(1, clipB - clipY);
+                // Map visible canvas rect back to source image pixels
+                const scaleImgX = img.naturalWidth  / el.width;
+                const scaleImgY = img.naturalHeight / el.height;
+                srcX = (clipX - el.x) * scaleImgX;
+                srcY = (clipY - el.y) * scaleImgY;
+                srcW = visW * scaleImgX;
+                srcH = visH * scaleImgY;
+            } else {
+                visW = el.width  || img.naturalWidth;
+                visH = el.height || img.naturalHeight;
+                srcX = 0; srcY = 0;
+                srcW = img.naturalWidth; srcH = img.naturalHeight;
+            }
+            const aspect = visW / visH;
+            const tw = aspect >= 1 ? THUMB : Math.round(THUMB * aspect);
+            const th = aspect >= 1 ? Math.round(THUMB / aspect) : THUMB;
+            try {
+                const tc = document.createElement('canvas');
+                tc.width = tw; tc.height = th;
+                tc.getContext('2d').drawImage(img, srcX, srcY, srcW, srcH, 0, 0, tw, th);
+                fastThumb = tc.toDataURL('image/jpeg', 0.7);
+            } catch (_) { /* tainted canvas — fall through */ }
+            // Compute chip name: el.name → AI cache → frame name → fallback
+            // This mirrors the layer panel's getLabel() logic for consistency.
+            const el0 = elements[0];
+            if (el0.name) {
+                fastName = el0.name.split(/\s+/).slice(0, 3).join(' ');
+            } else if (el0.src) {
+                const aiLabel = imageLabelCache.get(getImageCacheKey(el0.src));
+                if (aiLabel) {
+                    fastName = aiLabel.split(/\s+/).slice(0, 3).join(' ');
+                }
+            }
+            if (!fastName) {
+                const frameName = el0.parentFrame?.name;
+                fastName = (frameName && frameName !== 'Frame')
+                    ? frameName.split(/\s+/).slice(0, 2).join(' ')
+                    : 'Image';
+            }
         }
 
-        renderUploadedImages(instance);
-        updateSendState(instance);
+        // Insert chip immediately with the fast thumbnail (or fall back to full render)
+        let imgData;
+        if (fastThumb) {
+            const el0 = elements[0];
+            imgData = {
+                chipId: nextChipId(),
+                src: fastThumb,      // temporary — replaced below when full-res is ready
+                thumb: fastThumb,
+                name: fastName || 'Image',
+                fromSelection: true,
+                _pendingSrc: true,
+                // Store original src so recognizeImageLabel caches under the same key
+                // as describeImageElement / getImageLabel — ensuring layer & chip names match
+                _originalSrc: el0.src || null,
+            };
+            state.uploadedImages.push(imgData);
+            if (els.editor) insertInlineChip(instance, imgData, els.editor);
+            renderUploadedImages(instance);
+            updateSendState(instance);
+
+            // Check if we already have a good name — skip API if frame name or already cached
+            const hasFrameName = el0.parentFrame?.name && el0.parentFrame.name !== 'Frame';
+            const alreadyCached = el0.src && imageLabelCache.has(getImageCacheKey(el0.src));
+
+            setTimeout(() => {
+                const result = renderSelectionToImage(elements, engine);
+                if (result) {
+                    imgData.src = result.dataUrl;
+                    imgData._pendingSrc = false;
+                }
+                // If we already have a cached label (from describeImageElement), apply it now
+                if (alreadyCached) {
+                    const cached = imageLabelCache.get(getImageCacheKey(el0.src));
+                    updateChipLabel(instance, imgData, cached);
+                } else if (!hasFrameName) {
+                    // Skip AI recognition if name is already good from frame
+                    recognizeImageLabel(imgData, instance);
+                }
+            }, 0);
+        } else {
+            // Fallback: multi-element or no loaded image — synchronous path
+            const result = renderSelectionToImage(elements, engine);
+            if (!result) return;
+            const singleImg = elements.length === 1 && elements[0].type === 'image';
+            imgData = {
+                chipId: nextChipId(),
+                src: result.dataUrl,
+                thumb: result.thumbUrl,
+                name: result.name,
+                fromSelection: true,
+                // Pass original src so recognizeImageLabel caches under the same key as layers
+                _originalSrc: singleImg ? (elements[0].src || null) : null,
+            };
+            state.uploadedImages.push(imgData);
+            if (els.editor) insertInlineChip(instance, imgData, els.editor);
+            if (singleImg && elements[0].image) {
+                recognizeImageLabel(imgData, instance);
+            }
+            renderUploadedImages(instance);
+            updateSendState(instance);
+        }
     }
 
     /**
@@ -559,13 +797,29 @@
         label.className = 'gen-chip-label';
         const fullLabelText = imgData.name || 'image';
         label.dataset.fullLabel = fullLabelText;
-        label.textContent = fullLabelText; // Always show full label
+
+        // Selection chips (Text, Image, Circle, Sketch, Frame): always show full label
+        // User-uploaded image chips: show abbreviated (≤8 chars), expand on hover
+        const isSelectionChip = !!imgData.fromSelection;
+        if (isSelectionChip) {
+            label.textContent = fullLabelText;
+        } else {
+            // Truncate long labels; max 8 chars + ellipsis
+            label.textContent = fullLabelText.length > 8
+                ? fullLabelText.slice(0, 7) + '…'
+                : fullLabelText;
+        }
 
         chip.appendChild(thumb);
         chip.appendChild(label);
 
         let previewEl = null;
         chip.addEventListener('mouseenter', (e) => {
+            // Expand abbreviated label on hover (only for non-selection chips)
+            if (!isSelectionChip) {
+                label.textContent = fullLabelText;
+            }
+
             if (previewEl) return;
             previewEl = document.createElement('div');
             previewEl.className = 'gen-chip-preview';
@@ -580,6 +834,11 @@
             previewEl.style.transform = 'translateY(-100%)';
         });
         chip.addEventListener('mouseleave', () => {
+            // Collapse back to abbreviated label on leave (only for non-selection chips)
+            if (!isSelectionChip && fullLabelText.length > 8) {
+                label.textContent = fullLabelText.slice(0, 7) + '…';
+            }
+
             if (previewEl && previewEl.parentNode) {
                 previewEl.parentNode.removeChild(previewEl);
                 previewEl = null;
@@ -642,8 +901,14 @@
                 const chipLabel = chip.querySelector('.gen-chip-label');
                 if (chipLabel) {
                     chipLabel.dataset.fullLabel = labelText;
-                    // Always show full label
-                    chipLabel.textContent = labelText;
+                    const isSelection = !!chip.dataset.fromSelection;
+                    if (isSelection || chip.matches(':hover')) {
+                        chipLabel.textContent = labelText;
+                    } else {
+                        chipLabel.textContent = labelText.length > 8
+                            ? labelText.slice(0, 7) + '…'
+                            : labelText;
+                    }
                 }
             }
         }
@@ -653,19 +918,27 @@
      * Recognize image label with caching. Cached labels are reused immediately.
      */
     async function recognizeImageLabel(imgData, instance) {
-        const cacheKey = getImageCacheKey(imgData.src);
+        // Use the original element src as cache key so this label is shared with
+        // describeImageElement / getImageLabel (used by the layer panel).
+        // Fall back to thumbnail src if no original is available (e.g. uploaded files).
+        const originalSrc = imgData._originalSrc || null;
+        const cacheKey = getImageCacheKey(originalSrc || imgData.src);
 
-        // Check cache first
         if (imageLabelCache.has(cacheKey)) {
             updateChipLabel(instance, imgData, imageLabelCache.get(cacheKey));
+            // Also refresh layer panel so it picks up this label
+            const eng = window.canvasEngine;
+            if (eng) eng.render();
             return;
         }
 
         try {
+            // Send the small thumbnail (64px) instead of the full image for speed
+            const payload = imgData.thumb || imgData.src;
             const resp = await fetch('/api/describe-image', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ imageData: imgData.src })
+                body: JSON.stringify({ imageData: payload })
             });
             if (!resp.ok) return;
 
@@ -673,15 +946,23 @@
             const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (!text) return;
 
-            // Take the first keyword as the label
-            const keywords = text.split(/[\s,]+/).map(k => k.trim()).filter(Boolean);
-            let labelText = keywords.slice(0, 2).join(' ').slice(0, 24) || 'Image';
+            // Use only 1-2 words max
+            const words = text.split(/[\s,]+/).map(k => k.trim()).filter(Boolean);
+            let labelText = words[0] || 'Image';
+            if (words[1] && (labelText.length + words[1].length) <= 14) {
+                labelText += ' ' + words[1];
+            }
             labelText = labelText.charAt(0).toUpperCase() + labelText.slice(1);
 
-            // Store in cache
+            // Cache under the original src key so layer panel (getImageLabel) finds it too
             imageLabelCache.set(cacheKey, labelText);
+            _persistLabelCache();
 
             updateChipLabel(instance, imgData, labelText);
+
+            // Refresh the layer panel if open
+            const eng = window.canvasEngine;
+            if (eng) eng.render();
         } catch (err) {
             console.warn('[canvas-gen] Image recognition failed:', err);
         }
@@ -701,6 +982,11 @@
         els.collapsed.addEventListener('click', (e) => {
             e.stopPropagation();
             showPanel(instance, 'expanded');
+            // Re-collect in case chips were lost (e.g. image load timing after refresh)
+            const selEls = instance.state.selectedElements;
+            if (selEls && selEls.length > 0 && instance.state.uploadedImages.filter(i => i.fromSelection).length === 0) {
+                collectSelectedAsReference(instance, selEls);
+            }
             autoFocusEditor(instance);
         });
 
@@ -794,6 +1080,26 @@
     }
 
     // ==================== File Upload ====================
+
+    /**
+     * Downscale an HTMLImageElement to at most maxPx on the longest side and return
+     * a JPEG data URL.  Used to keep API payloads small and generation fast.
+     */
+    function resizeImageForUpload(img, maxPx = 1024, quality = 0.85) {
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        if (w > maxPx || h > maxPx) {
+            const scale = maxPx / Math.max(w, h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+        }
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        return c.toDataURL('image/jpeg', quality);
+    }
+
     function handleFileUpload(instance, files) {
         const MAX_FILE_SIZE = 10 * 1024 * 1024;
         const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
@@ -810,7 +1116,7 @@
 
             const reader = new FileReader();
             reader.onload = (e) => {
-                const dataUrl = e.target.result;
+                const rawDataUrl = e.target.result;
                 // Create a thumbnail for the inline chip
                 const img = new Image();
                 img.onload = () => {
@@ -823,12 +1129,16 @@
                     ctx.drawImage(img, 0, 0, thumbCanvas.width, thumbCanvas.height);
                     const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.7);
 
+                    // Downscale to ≤1024px JPEG so the API upload is fast regardless of
+                    // original file size.
+                    const compressedSrc = resizeImageForUpload(img, 1024, 0.85);
+
                     // Extract short name from filename
                     const shortName = file.name.replace(/\.[^.]+$/, '').slice(0, 15);
 
                     const imgData = {
                         chipId: nextChipId(),
-                        src: dataUrl,
+                        src: compressedSrc,
                         thumb: thumbUrl,
                         name: shortName || 'image',
                     };
@@ -1022,11 +1332,32 @@
             if (name.length > 20) name = name.slice(0, 20).trim();
             name = name.charAt(0).toUpperCase() + name.slice(1);
 
-            frame.name = name || 'Generated';
-            if (window.canvasEngine) window.canvasEngine.render();
+            if (name) {
+                frame.name = name;
+                if (window.canvasEngine) window.canvasEngine.render();
+            }
         } catch (err) {
             console.warn('[canvas-gen] Auto-naming frame failed:', err);
         }
+    }
+
+    /**
+     * Derive an immediate placeholder name from the user prompt.
+     * Uses the first 1–3 meaningful words, capitalised.
+     */
+    function quickNameFromPrompt(prompt) {
+        if (!prompt) return null;
+        // Strip quoted image labels like «photo» and punctuation
+        const words = prompt
+            .replace(/«[^»]*»/g, '')
+            .replace(/[^a-zA-Z0-9\u4e00-\u9fff\s]/g, ' ')
+            .trim()
+            .split(/\s+/)
+            .filter(w => w.length > 1);
+        if (!words.length) return null;
+        let name = words.slice(0, 3).join(' ');
+        if (name.length > 20) name = name.slice(0, 20).trim();
+        return name.charAt(0).toUpperCase() + name.slice(1);
     }
 
     /**
@@ -1144,19 +1475,24 @@
         };
 
         state.isGenerating = true;
-        // Keep panel in collapsed state — loading is shown on the frame itself.
-        // Clear the editor so it looks ready for next prompt.
+        // Hide panel during generation — only the cancel overlay is shown.
         els.editor.textContent = '';
         state.uploadedImages = [];
         renderUploadedImages(instance);
-        showPanel(instance, 'collapsed');
+        hidePanel(instance);
 
         const abortController = new AbortController();
         state.abortController = abortController;
         els.sendBtn.disabled = true;
 
-        // Show a floating Cancel link near the generating frames
-        const cancelOverlay = showCancelOverlay(abortController);
+        // Save the pre-generation state so Cmd+Z can jump back to BEFORE generation,
+        // then suppress all further saveState() calls until generation completes —
+        // intermediate "frame with loading overlay" states must not pollute the undo stack.
+        engine.saveState();
+        engine._suppressHistory = true;
+
+        // Cancel overlays will be created after target slots are ready
+        let cancelOverlayGroup = null;
 
         // Determine generation mode
         const sourceFrame = genContext.frame;
@@ -1286,6 +1622,25 @@
         engine.render();
         startFrameLoadingAnimation();
 
+        // Persist generation state so it can be resumed after a page refresh
+        const _genProjectId = new URLSearchParams(window.location.search).get('id');
+        if (_genProjectId) {
+            saveGenState(_genProjectId, {
+                frames: targetSlots.map(s => ({
+                    x: s.frame.x, y: s.frame.y,
+                    width: s.frame.width, height: s.frame.height,
+                    isNew: s.isNew
+                })),
+                prompt,
+                modelId: state.isAutoMode ? 'nano-banana' : state.selectedModel,
+                imageCount: genContext.imageCount,
+                timestamp: Date.now()
+            });
+        }
+
+        // Show per-frame cancel overlays now that slots are created
+        cancelOverlayGroup = showCancelOverlays(targetSlots, abortController);
+
         // --- Build request body ---
         const parts = [];
         const textPrompt = prompt || 'Generate a high-quality image based on the reference image(s) provided.';
@@ -1298,8 +1653,11 @@
             }
         }
 
-        // --- Resolution / quality: user-specified takes priority, else 2K default ---
-        let imageSize = '2K';
+        // --- Resolution / quality: user-specified takes priority, else 1K default ---
+        // 1K is the default: frames are typically 1080px, the response is much smaller
+        // (faster download), and quality is indistinguishable at canvas viewing distances.
+        // Users can request higher quality by including "2k" or "4k" in the prompt.
+        let imageSize = '1K';
         if (/\b4[kK]\b/.test(prompt)) imageSize = '4K';
         else if (/\b2[kK]\b/.test(prompt)) imageSize = '2K';
         else if (/\b1[kK]\b/.test(prompt)) imageSize = '1K';
@@ -1354,7 +1712,7 @@
                     if (result) {
                         // Load into Image object
                         const img = await loadImageFromData(result.dataUrl);
-                        placeImageIntoFrame(engine, slot.frame, img, result.dataUrl, isReplaceMode && slotIndex === 0);
+                        placeImageIntoFrame(engine, slot.frame, img, result.dataUrl, isReplaceMode && slotIndex === 0, textPrompt);
                         anySuccess = true;
                         lastError = null;
                         break;
@@ -1406,6 +1764,8 @@
         } finally {
             state.isGenerating = false;
             state.abortController = null;
+            // Clear persisted generation state (completed or cancelled)
+            if (_genProjectId) clearGenState(_genProjectId);
             // Clear loading states and remove empty new frames (e.g. after cancel)
             targetSlots.forEach(s => {
                 s.frame._generating = false;
@@ -1416,11 +1776,19 @@
                     if (idx !== -1) engine.elements.splice(idx, 1);
                 }
             });
-            // Remove the cancel overlay
-            if (cancelOverlay && cancelOverlay.parentNode) cancelOverlay.remove();
-            showPanel(instance, 'collapsed');
-            updateSendState(instance);
-            if (engine) engine.render();
+            // Re-enable history and save the final post-generation state so it is
+            // reachable via Cmd+Shift+Z (redo) but the noisy intermediate states are gone.
+            engine._suppressHistory = false;
+            engine.saveState();
+            // Remove all cancel overlays
+            if (cancelOverlayGroup) cancelOverlayGroup.removeAll();
+            // Deselect and hide panel after generation completes
+            hidePanel(instance);
+            if (engine) {
+                engine.selectedElements = [];
+                if (engine.onSelectionChange) engine.onSelectionChange([]);
+                engine.render();
+            }
         }
     }
 
@@ -1448,7 +1816,7 @@
      * squashed or stretched (frame adapts to image, not the other way around).
      * If isReplace=true, remove existing images in the frame first.
      */
-    function placeImageIntoFrame(engine, frame, img, dataUrl, isReplace) {
+    function placeImageIntoFrame(engine, frame, img, dataUrl, isReplace, promptHint) {
         if (isReplace) {
             const old = engine.elements.filter(el =>
                 el.type === 'image' && (
@@ -1465,22 +1833,19 @@
         const iw = img.naturalWidth || img.width || 1;
         const ih = img.naturalHeight || img.height || 1;
         const imageAspect = iw / ih;
-        const imageLong = Math.max(iw, ih);
 
-        // Scale frame logical size by actual resolution so 2K/4K images occupy more canvas space
-        const refPx = 2048;
-        const baseLogical = 800;
+        // Resize the frame to match the generated image's aspect ratio while keeping
+        // the frame's current longest side as the reference dimension.
+        // This preserves the layout the user set up (frame size stays similar),
+        // only the aspect ratio adjusts to fit the actual image.
         const maxSide = Math.max(frame.width, frame.height);
-        const resolutionScale = Math.max(0.25, Math.min(4, imageLong / refPx));
-        const scaledMax = Math.max(maxSide, baseLogical * resolutionScale);
-
         let newW, newH;
         if (imageAspect >= 1) {
-            newW = scaledMax;
-            newH = scaledMax / imageAspect;
+            newW = maxSide;
+            newH = Math.round(maxSide / imageAspect);
         } else {
-            newH = scaledMax;
-            newW = scaledMax * imageAspect;
+            newH = maxSide;
+            newW = Math.round(maxSide * imageAspect);
         }
         const centerX = frame.x + frame.width / 2;
         const centerY = frame.y + frame.height / 2;
@@ -1509,6 +1874,13 @@
             engine.elements.splice(firstNonImageChildIndex, 0, imageElement);
         } else {
             engine.elements.push(imageElement);
+        }
+
+        // Give the frame an instant name from the prompt so the label is never blank.
+        // autoNameFrame will overwrite with a more descriptive AI-derived name later.
+        const immediate = quickNameFromPrompt(promptHint);
+        if (immediate && (!frame.name || frame.name === 'Frame')) {
+            frame.name = immediate;
         }
 
         autoNameFrame(frame, dataUrl);
@@ -1608,6 +1980,17 @@
             // Call existing handler first (frame-action-bar logic)
             if (existingSelectionHandler) existingSelectionHandler(selectedElements);
 
+            // Hide gen panels while editing text inline
+            if (engine.editingText) {
+                for (const [, inst] of panelRegistry) {
+                    if (!inst.state.isGenerating) {
+                        hidePanel(inst);
+                    }
+                }
+                _lastSelectionKey = null;
+                return;
+            }
+
             // Compute current key and skip if selection hasn't actually changed
             const currentKey = selectedElements.length > 0 ? getPanelKey(selectedElements) : null;
             if (currentKey === _lastSelectionKey) return;
@@ -1655,9 +2038,7 @@
                 instance.state.currentFrame = frame;
                 instance.state.currentAnchor = frame;
 
-                const hasContent = engine.elements.some(el => el.parentFrame === frame);
-
-                if (!hasContent) {
+                if (frame._justCreated) {
                     showPanel(instance, 'expanded');
                     autoFocusEditor(instance);
                 } else {
@@ -1680,9 +2061,8 @@
                 if (inst.state.panelMode !== 'hidden') {
                     // Recompute anchor from live element positions (for drag follow)
                     if (inst.state.selectedElements && inst.state.selectedElements.length > 0) {
-                        const frame = inst.state.selectedElements.find(el => el.type === 'frame');
-                        if (frame) {
-                            inst.state.currentAnchor = frame;
+                        if (inst.state.selectedElements.length === 1 && inst.state.selectedElements[0].type === 'frame') {
+                            inst.state.currentAnchor = inst.state.selectedElements[0];
                         } else {
                             inst.state.currentAnchor = getSelectionBounds(inst.state.selectedElements);
                         }
@@ -1694,9 +2074,20 @@
             }
         };
 
-        // Expose global helper so canvas.js Tab shortcut can expand+focus the active panel
+        // Expose global helper so canvas.js Tab shortcut can expand+focus the active panel.
+        // Robust: if no panel exists yet, create one from the current engine selection.
         window.canvasGenFocusPanel = () => {
-            // Find the currently visible (non-hidden) panel, or the most recently active one
+            const selectedElements = engine.selectedElements;
+            if (!selectedElements || selectedElements.length === 0) return;
+
+            // Don't expand the panel if any selected frame is currently generating.
+            // The cancel overlay is already shown; Tab should not open the input box on top.
+            const hasGeneratingFrame = selectedElements.some(el => el._generating) ||
+                engine.elements.some(el => el._generating &&
+                    selectedElements.some(sel => sel === el || sel === el.parentFrame));
+            if (hasGeneratingFrame) return;
+
+            // Try to find an existing visible panel first
             let target = null;
             for (const [, inst] of panelRegistry) {
                 if (inst.state.panelMode !== 'hidden' && !inst.state.isGenerating) {
@@ -1704,8 +2095,34 @@
                     break;
                 }
             }
-            if (!target) return;
+
+            // If no visible panel exists, create one from the current selection
+            if (!target) {
+                const key = getPanelKey(selectedElements);
+                target = getOrCreatePanel(key);
+                if (!target) return;
+
+                const frame = selectedElements.find(el => el.type === 'frame');
+                target.state.selectedElements = [...selectedElements];
+                if (selectedElements.length === 1 && frame) {
+                    target.state.currentFrame = frame;
+                    target.state.currentAnchor = frame;
+                } else {
+                    target.state.currentFrame = findParentFrame(selectedElements);
+                    target.state.currentAnchor = getSelectionBounds(selectedElements);
+                }
+                _lastSelectionKey = key;
+            }
+
             showPanel(target, 'expanded');
+
+            // Re-collect selected elements as reference image chip.
+            // Run AFTER showPanel so the editor DOM is visible and can receive chips.
+            const selEls = target.state.selectedElements;
+            if (selEls && selEls.length > 0) {
+                collectSelectedAsReference(target, selEls);
+            }
+
             autoFocusEditor(target);
         };
 
@@ -1715,56 +2132,55 @@
     // ==================== Cancel Overlay ====================
 
     /**
-     * Show a floating "Cancel" text link that follows the generating frames.
-     * Returns the overlay DOM element so the caller can remove it when done.
+     * Show a floating "Cancel" overlay for each generating frame.
+     * Returns an array of overlay DOM elements so the caller can remove them all.
      */
-    function showCancelOverlay(abortController) {
-        const overlay = document.createElement('div');
-        overlay.className = 'gen-cancel-overlay';
-        overlay.textContent = 'Cancel';
-        overlay.addEventListener('click', () => {
-            abortController.abort();
+    function showCancelOverlays(targetSlots, abortController) {
+        const overlays = [];
+        const CANCEL_INSET_FROM_BOTTOM = 28;
+
+        targetSlots.forEach(slot => {
+            const overlay = document.createElement('div');
+            overlay.className = 'gen-cancel-overlay';
+            overlay.textContent = 'Cancel';
+            overlay.addEventListener('click', () => {
+                abortController.abort();
+            });
+            document.body.appendChild(overlay);
+            overlays.push({ el: overlay, frame: slot.frame });
         });
-        document.body.appendChild(overlay);
 
-        // Keep the overlay positioned inside the first generating frame,
-        // near its bottom center (inset from the bottom edge).
-        const CANCEL_INSET_FROM_BOTTOM = 28; // px from bottom of frame in screen space
-        function positionOverlay() {
-            const engine = window.canvasEngine;
-            if (!engine || !overlay.parentNode) return;
-            const frames = engine.elements.filter(el => el._generating);
-            if (!frames.length) return;
-
-            // Use the first (primary) generating frame as the anchor
-            const f = frames[0];
-            const centerWorld = engine.worldToScreen(f.x + f.width / 2, f.y + f.height);
-            const rect = engine.canvas.getBoundingClientRect();
-            const centerX = rect.left + centerWorld.x;
-            // Position inside the frame: bottom of frame minus inset
-            const insideY = rect.top + centerWorld.y - CANCEL_INSET_FROM_BOTTOM;
-
-            overlay.style.left = centerX + 'px';
-            overlay.style.top = insideY + 'px';
-        }
-
-        // Animate position updates while overlay is alive
         let raf;
         function tick() {
-            if (!overlay.parentNode) return;
-            positionOverlay();
-            raf = requestAnimationFrame(tick);
+            const engine = window.canvasEngine;
+            if (!engine) { raf = null; return; }
+            const rect = engine.canvas.getBoundingClientRect();
+            let anyAlive = false;
+            overlays.forEach(o => {
+                if (!o.el.parentNode) return;
+                if (!o.frame._generating) {
+                    o.el.remove();
+                    return;
+                }
+                anyAlive = true;
+                const center = engine.worldToScreen(
+                    o.frame.x + o.frame.width / 2,
+                    o.frame.y + o.frame.height
+                );
+                o.el.style.left = (rect.left + center.x) + 'px';
+                o.el.style.top = (rect.top + center.y - CANCEL_INSET_FROM_BOTTOM) + 'px';
+            });
+            if (anyAlive) raf = requestAnimationFrame(tick);
+            else raf = null;
         }
         raf = requestAnimationFrame(tick);
 
-        // Store raf so we can cancel it when overlay is removed
-        const origRemove = overlay.remove.bind(overlay);
-        overlay.remove = () => {
-            cancelAnimationFrame(raf);
-            origRemove();
+        return {
+            removeAll() {
+                if (raf) cancelAnimationFrame(raf);
+                overlays.forEach(o => { if (o.el.parentNode) o.el.remove(); });
+            }
         };
-
-        return overlay;
     }
 
     // ==================== Frame Loading Animation ====================
@@ -1796,6 +2212,164 @@
      * a pre-supplied prompt (autoGen=1 query param).
      */
     window.GenPanel = {
+        /**
+         * Resume a generation that was interrupted by a page refresh.
+         * Finds the matching frames, re-marks them as generating, and re-calls the API.
+         */
+        async resumePending(projectId) {
+            const saved = loadGenState(projectId);
+            if (!saved) return;
+
+            const engine = window.canvasEngine;
+            if (!engine) return;
+
+            const modelId = saved.modelId || 'nano-banana';
+            const modelConfig = MODEL_CONFIGS[modelId];
+            if (!modelConfig) { clearGenState(projectId); return; }
+
+            // Find matching frames by coordinate proximity
+            const targetSlots = [];
+            for (const fd of (saved.frames || [])) {
+                const frame = engine.elements.find(el =>
+                    el.type === 'frame' &&
+                    Math.abs(el.x - fd.x) < 2 &&
+                    Math.abs(el.y - fd.y) < 2 &&
+                    Math.abs(el.width - fd.width) < 2 &&
+                    Math.abs(el.height - fd.height) < 2
+                );
+                if (frame) {
+                    frame._generating = true;
+                    frame._genStartTime = performance.now();
+                    targetSlots.push({ frame, isNew: fd.isNew || false });
+                }
+            }
+
+            if (targetSlots.length === 0) { clearGenState(projectId); return; }
+
+            engine.render();
+            startFrameLoadingAnimation();
+
+            const abortController = new AbortController();
+            const cancelOverlayGroup = showCancelOverlays(targetSlots, abortController);
+
+            const textPrompt = saved.prompt || 'Generate a high-quality image.';
+            const sourceFrame = targetSlots[0].frame;
+            const aspectRatio = getClosestAspectRatio(sourceFrame.width, sourceFrame.height);
+            const requestBody = {
+                contents: [{ role: 'user', parts: [{ text: textPrompt }] }],
+                generationConfig: {
+                    responseModalities: ['TEXT', 'IMAGE'],
+                    imageConfig: { aspectRatio, imageSize: '1K' }
+                }
+            };
+
+            try {
+                await Promise.all(targetSlots.map(async (slot) => {
+                    if (abortController.signal.aborted) return;
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        if (abortController.signal.aborted) return;
+                        try {
+                            const result = await callGenerateApi(modelConfig, requestBody, abortController);
+                            if (result) {
+                                const img = await loadImageFromData(result.dataUrl);
+                                placeImageIntoFrame(engine, slot.frame, img, result.dataUrl, false, textPrompt);
+                                break;
+                            }
+                        } catch (e) {
+                            if (e.name === 'AbortError') return;
+                            if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+                        }
+                    }
+                    slot.frame._generating = false;
+                    delete slot.frame._genStartTime;
+                    engine.render();
+                }));
+            } finally {
+                clearGenState(projectId);
+                targetSlots.forEach(s => {
+                    s.frame._generating = false;
+                    delete s.frame._genStartTime;
+                    if (s.isNew && !engine.elements.some(el => el.parentFrame === s.frame && el.type === 'image')) {
+                        const idx = engine.elements.indexOf(s.frame);
+                        if (idx !== -1) engine.elements.splice(idx, 1);
+                    }
+                });
+                cancelOverlayGroup.removeAll();
+                engine.render();
+            }
+        },
+
+        /**
+         * Describe an image element and store its AI label in the cache.
+         * Called whenever a new image is added to the canvas (any source).
+         * Silently no-ops if the label is already cached.
+         */
+        async describeImageElement(el) {
+            if (!el || el.type !== 'image' || !el.src) return;
+            const cacheKey = getImageCacheKey(el.src);
+            if (imageLabelCache.has(cacheKey)) return; // already known
+
+            // Build a small thumbnail to send (faster API call)
+            let payload = el.src;
+            try {
+                const THUMB = 128;
+                const img = el.image;
+                if (img && img.naturalWidth > 0) {
+                    const tc = document.createElement('canvas');
+                    const scale = Math.min(1, THUMB / Math.max(img.naturalWidth, img.naturalHeight));
+                    tc.width  = Math.round(img.naturalWidth  * scale);
+                    tc.height = Math.round(img.naturalHeight * scale);
+                    tc.getContext('2d').drawImage(img, 0, 0, tc.width, tc.height);
+                    payload = tc.toDataURL('image/jpeg', 0.75);
+                }
+            } catch (_) { /* use full src */ }
+
+            try {
+                const resp = await fetch('/api/describe-image', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ imageData: payload })
+                });
+                if (!resp.ok) return;
+                const result = await resp.json();
+                const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!text) return;
+
+                const words = text.split(/[\s,]+/).map(k => k.trim()).filter(Boolean);
+                let labelText = words[0] || 'Image';
+                if (words[1] && (labelText.length + words[1].length) <= 14) {
+                    labelText += ' ' + words[1];
+                }
+                labelText = labelText.charAt(0).toUpperCase() + labelText.slice(1);
+
+                imageLabelCache.set(cacheKey, labelText);
+                _persistLabelCache();
+
+                // Trigger layer panel refresh if open
+                const engine = window.canvasEngine;
+                if (engine) engine.render();
+            } catch (err) {
+                console.warn('[canvas-gen] describeImageElement failed:', err);
+            }
+        },
+
+        /**
+         * Return a human-readable label for an image element, using the cached AI label
+         * if available. Falls back to the frame name or "Image".
+         */
+        getImageLabel(el) {
+            if (!el || el.type !== 'image') return null;
+            // Use cached AI label first
+            if (el.src) {
+                const cached = imageLabelCache.get(getImageCacheKey(el.src));
+                if (cached) return cached;
+            }
+            // Fall back to parent frame name
+            const frameName = el.parentFrame?.name;
+            if (frameName && frameName !== 'Frame') return frameName;
+            return null;
+        },
+
         triggerAutoGeneration(promptText) {
             const engine = window.canvasEngine;
             if (!engine) {

@@ -41,6 +41,7 @@ class CanvasEngine {
         this.rotateStartAngle = 0;
         this.rotateElementStartAngle = 0;
         this.rotateCenterWorld = null;
+        this.hoveredRotCorner = null; // Currently hovered rotation corner ('nw'|'ne'|'se'|'sw')
         this.dragStart = null;
         this.lastMousePos = null;
         this.tempElement = null;
@@ -54,6 +55,9 @@ class CanvasEngine {
         // Frame container state
         this.highlightedFrame = null; // Frame being hovered during drag
         this.enteredFrame = null; // Frame the user has "entered" (double-click to enter)
+
+        // Internal clipboard for copy/paste of canvas elements
+        this._clipboard = null; // { elements: [...deep clones], offsetX, offsetY }
 
         // Performance optimization
         this.renderScheduled = false;
@@ -116,16 +120,20 @@ class CanvasEngine {
         this.render();
     }
 
-    zoom(delta, centerX, centerY, rawDelta) {
-        // Proportional trackpad pinch: more rawDelta = more zoom, capped to ±25% per event
+    zoom(delta, centerX, centerY, rawDelta, deltaMode) {
+        // Smooth zoom: proportional to input magnitude
         let zoomFactor;
         if (rawDelta !== undefined) {
-            // Scale: each deltaY unit ≈ 1.2% zoom; cap single event at ±25%
-            const pct = Math.max(-0.25, Math.min(0.25, -rawDelta * 0.012));
+            // Trackpad pinch (deltaMode=0, small values) vs mouse wheel (deltaMode=0/1, larger values)
+            // deltaMode 1 = line, typically 3 lines per notch
+            const lineMultiplier = (deltaMode === 1) ? 20 : 1;
+            const scaledDelta = rawDelta * lineMultiplier;
+            // Sensitivity: 1.5% per pixel, capped at ±30% per frame for smoothness
+            const pct = Math.max(-0.30, Math.min(0.30, -scaledDelta * 0.015));
             zoomFactor = 1 + pct;
         } else {
             // Keyboard shortcuts — fixed step
-            zoomFactor = delta > 0 ? 1.10 : 0.91;
+            zoomFactor = delta > 0 ? 1.12 : 0.89;
         }
         let newScale = this.viewport.scale * zoomFactor;
         newScale = Math.max(this.viewport.minScale, Math.min(this.viewport.maxScale, newScale));
@@ -174,32 +182,98 @@ class CanvasEngine {
         } else {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             this.elements.forEach(el => {
-                minX = Math.min(minX, el.x);
-                minY = Math.min(minY, el.y);
-                maxX = Math.max(maxX, el.x + el.width);
-                maxY = Math.max(maxY, el.y + el.height);
+                let x, y, w, h;
+                if (el.type === 'path') {
+                    const b = this.getPathBounds(el);
+                    x = b.x; y = b.y; w = b.width; h = b.height;
+                } else {
+                    x = el.x; y = el.y; w = el.width; h = el.height;
+                }
+                if (!isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h)) return;
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, x + w);
+                maxY = Math.max(maxY, y + h);
             });
 
-            // Padding: keep 20px from sidebars/toolbars
-            // Left sidebar ~68px + 20px, right 40px, top 60px + 20px, bottom toolbar ~68px + 20px
+            const contentWidth = maxX - minX;
+            const contentHeight = maxY - minY;
+
+            if (!isFinite(minX) || contentWidth <= 0 || contentHeight <= 0) {
+                this.viewport.x = this.cssWidth / 2;
+                this.viewport.y = this.cssHeight / 2;
+                this.viewport.scale = 0.2;
+                this.render();
+                this.updateZoomDisplay();
+                return;
+            }
+
             const padLeft = 88;
             const padRight = 40;
             const padTop = 80;
             const padBottom = 88;
-            const availW = this.cssWidth - padLeft - padRight;
-            const availH = this.cssHeight - padTop - padBottom;
-            const contentWidth = maxX - minX;
-            const contentHeight = maxY - minY;
+            const availW = Math.max(1, this.cssWidth - padLeft - padRight);
+            const availH = Math.max(1, this.cssHeight - padTop - padBottom);
             const scaleX = availW / contentWidth;
             const scaleY = availH / contentHeight;
 
             this.viewport.scale = Math.min(scaleX, scaleY, this.viewport.maxScale);
-            // Center content within the available area
             const centerX = padLeft + availW / 2;
             const centerY = padTop + availH / 2;
             this.viewport.x = centerX - (minX + contentWidth / 2) * this.viewport.scale;
             this.viewport.y = centerY - (minY + contentHeight / 2) * this.viewport.scale;
         }
+
+        this.render();
+        this.updateZoomDisplay();
+    }
+
+    // Zoom + pan to fit specific elements, accounting for UI chrome.
+    // options: { padLeft, padRight, padTop, padBottom, maxScale, minScale }
+    fitToElements(elements, options = {}) {
+        if (!elements || elements.length === 0) return;
+
+        const padLeft = options.padLeft ?? 88;
+        const padRight = options.padRight ?? 60;
+        const padTop = options.padTop ?? 80;
+        const padBottom = options.padBottom ?? 200; // extra for gen panel
+        const maxScale = options.maxScale ?? 2.0;
+        const minScale = options.minScale ?? this.viewport.minScale;
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        elements.forEach(el => {
+            let x, y, w, h;
+            if (el.type === 'path') {
+                const b = this.getPathBounds(el);
+                x = b.x; y = b.y; w = b.width; h = b.height;
+            } else {
+                x = el.x ?? 0; y = el.y ?? 0; w = el.width ?? 0; h = el.height ?? 0;
+            }
+            if (!isFinite(x) || !isFinite(y)) return;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x + w);
+            maxY = Math.max(maxY, y + h);
+        });
+
+        if (!isFinite(minX)) return;
+
+        const availW = Math.max(1, this.cssWidth - padLeft - padRight);
+        const availH = Math.max(1, this.cssHeight - padTop - padBottom);
+        const contentW = maxX - minX;
+        const contentH = maxY - minY;
+
+        if (contentW <= 0 || contentH <= 0) return;
+
+        const scaleX = availW / contentW;
+        const scaleY = availH / contentH;
+        const newScale = Math.max(minScale, Math.min(scaleX, scaleY, maxScale));
+        this.viewport.scale = newScale;
+
+        const centerX = padLeft + availW / 2;
+        const centerY = padTop + availH / 2;
+        this.viewport.x = centerX - (minX + contentW / 2) * newScale;
+        this.viewport.y = centerY - (minY + contentH / 2) * newScale;
 
         this.render();
         this.updateZoomDisplay();
@@ -238,8 +312,11 @@ class CanvasEngine {
         return elements;
     }
 
-    // Save current state BEFORE making changes
+    // Save current state BEFORE making changes.
+    // When _suppressHistory is true the call is a no-op — used during AI generation
+    // so that the intermediate "frame + loading overlay" states never enter the undo stack.
     saveState() {
+        if (this._suppressHistory) return;
         const clonedElements = this.cloneElements(this.elements);
         const state = { elements: clonedElements };
 
@@ -471,15 +548,40 @@ class CanvasEngine {
 
     setupEventListeners() {
         this.canvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
-        this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
-        this.canvas.addEventListener('mouseup', (e) => this.handleMouseUp(e));
+        // mousemove and mouseup are on the document so that drag/resize/rotate operations
+        // continue to work even when the cursor moves over floating UI elements (e.g. the
+        // cancel overlay shown on generating frames).
+        document.addEventListener('mousemove', (e) => this.handleMouseMove(e));
+        document.addEventListener('mouseup', (e) => this.handleMouseUp(e));
         // passive: false is required so that preventDefault() actually works for wheel events
         this.canvas.addEventListener('wheel', (e) => this.handleWheel(e), { passive: false });
         this.canvas.addEventListener('dblclick', (e) => this.handleDoubleClick(e));
+        // Clear rotation hover indicator when mouse leaves canvas
+        this.canvas.addEventListener('mouseleave', () => {
+            if (this.hoveredRotCorner !== null) {
+                this.hoveredRotCorner = null;
+                this.scheduleRender();
+            }
+        });
 
         document.addEventListener('keydown', (e) => this.handleKeyDown(e));
         document.addEventListener('keyup', (e) => this.handleKeyUp(e));
         document.addEventListener('paste', (e) => this.handlePaste(e));
+
+        // Prevent browser zoom (Ctrl/Cmd +/-/0 and Ctrl+wheel) and horizontal swipe-back
+        // navigation globally. Chrome/Safari interpret a fast horizontal trackpad swipe as
+        // "back / forward" — preventDefault() on the wheel event suppresses that.
+        document.addEventListener('wheel', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                return;
+            }
+            // Block horizontal swipe-back: any deltaX (trackpad two-finger left swipe)
+            // that could trigger the browser's back/forward navigation gesture.
+            if (Math.abs(e.deltaX) > 0) {
+                e.preventDefault();
+            }
+        }, { passive: false });
 
         this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     }
@@ -529,6 +631,11 @@ class CanvasEngine {
                         if (this.onSelectionChange) {
                             this.onSelectionChange(this.selectedElements);
                         }
+
+                        // Auto-describe image for layer naming
+                        if (window.GenPanel && window.GenPanel.describeImageElement) {
+                            window.GenPanel.describeImageElement(element);
+                        }
                     };
                     img.src = ev.target.result;
                 };
@@ -536,6 +643,107 @@ class CanvasEngine {
                 return; // Only handle first image
             }
         }
+    }
+
+    // ==================== Copy / Paste ====================
+
+    _copyToClipboard() {
+        // Collect selected elements + their frame children
+        const toCopy = new Set(this.selectedElements);
+        this.selectedElements.forEach(el => {
+            if (el.type === 'frame') {
+                this.getFrameChildren(el).forEach(c => toCopy.add(c));
+            }
+        });
+
+        // Compute bounding box for offset calculation
+        let minX = Infinity, minY = Infinity;
+        toCopy.forEach(el => {
+            minX = Math.min(minX, el.x ?? Infinity);
+            minY = Math.min(minY, el.y ?? Infinity);
+        });
+        if (!isFinite(minX)) minX = 0;
+        if (!isFinite(minY)) minY = 0;
+
+        // Deep-clone each element (preserve image reference — it's immutable display data)
+        const clones = [];
+        const frameIdMap = new Map(); // original frame → cloned frame
+
+        // First pass: clone frames so children can reference them
+        toCopy.forEach(el => {
+            if (el.type !== 'frame') return;
+            const clone = Object.assign({}, el);
+            delete clone._fid;
+            delete clone._pfid;
+            frameIdMap.set(el, clone);
+            clones.push(clone);
+        });
+
+        // Second pass: clone non-frames
+        toCopy.forEach(el => {
+            if (el.type === 'frame') return;
+            const clone = Object.assign({}, el);
+            delete clone._fid;
+            delete clone._pfid;
+            // Re-link parentFrame to the cloned frame if it was also copied
+            if (el.parentFrame && frameIdMap.has(el.parentFrame)) {
+                clone.parentFrame = frameIdMap.get(el.parentFrame);
+            } else {
+                delete clone.parentFrame; // detach if parent not in selection
+            }
+            // Deep-clone path points
+            if (el.type === 'path' && el.points) {
+                clone.points = el.points.map(p => ({ ...p }));
+            }
+            clones.push(clone);
+        });
+
+        this._clipboard = { elements: clones, originX: minX, originY: minY, pasteCount: 0 };
+    }
+
+    _pasteFromClipboard() {
+        if (!this._clipboard) return;
+
+        this._clipboard.pasteCount++;
+        const PASTE_OFFSET = 20 * this._clipboard.pasteCount;
+
+        // Clone again from the stored clipboard (so repeated Cmd+V keeps pasting)
+        const frameIdMap = new Map();
+        const newElements = [];
+
+        // First pass: frames
+        this._clipboard.elements.forEach(el => {
+            if (el.type !== 'frame') return;
+            const clone = Object.assign({}, el);
+            clone.x = el.x + PASTE_OFFSET;
+            clone.y = el.y + PASTE_OFFSET;
+            // path points
+            if (el.type === 'path' && el.points) clone.points = el.points.map(p => ({ ...p, x: p.x + PASTE_OFFSET, y: p.y + PASTE_OFFSET }));
+            frameIdMap.set(el, clone);
+            newElements.push(clone);
+        });
+
+        // Second pass: non-frames
+        this._clipboard.elements.forEach(el => {
+            if (el.type === 'frame') return;
+            const clone = Object.assign({}, el);
+            clone.x = el.x + PASTE_OFFSET;
+            clone.y = el.y + PASTE_OFFSET;
+            if (el.type === 'path' && el.points) clone.points = el.points.map(p => ({ ...p, x: p.x + PASTE_OFFSET, y: p.y + PASTE_OFFSET }));
+            if (el.parentFrame && frameIdMap.has(el.parentFrame)) {
+                clone.parentFrame = frameIdMap.get(el.parentFrame);
+            } else {
+                delete clone.parentFrame;
+            }
+            newElements.push(clone);
+        });
+
+        this.saveState();
+        this.elements.push(...newElements);
+        this.selectedElements = newElements.filter(el => !el.parentFrame); // select top-level pasted elements
+        this.render();
+
+        if (this.onSelectionChange) this.onSelectionChange(this.selectedElements);
     }
 
     handleMouseDown(e) {
@@ -562,6 +770,7 @@ class CanvasEngine {
                 // Rotation handle detected
                 if (handle.startsWith('rot-')) {
                     const element = this.selectedElements[0];
+                    if (element.type === 'frame') return; // frames cannot be rotated
                     this.isRotating = true;
                     this.rotateHandle = handle;
                     // Center of element in world space
@@ -575,7 +784,7 @@ class CanvasEngine {
                         worldPos.x - this.rotateCenterWorld.x
                     );
                     this.rotateElementStartAngle = element.rotation || 0;
-                    this.canvas.style.cursor = 'grabbing';
+                    this.canvas.style.cursor = this._getRotateCursor(handle.slice(4));
                     return;
                 }
 
@@ -676,21 +885,42 @@ class CanvasEngine {
         const y = e.clientY - rect.top;
         const worldPos = this.screenToWorld(x, y);
 
-        // Update cursor for resize/rotation handles
-        if (this.currentTool === 'move' && this.selectedElements.length > 0 && !this.isDragging && !this.isResizing && !this.isRotating) {
+        // Determine whether the cursor is physically over the canvas element.
+        // Hover-only effects (handle highlighting, cursor changes) are skipped when
+        // the cursor is outside the canvas, but active operations (drag / resize /
+        // rotate / pan) continue so they aren't interrupted by floating overlays.
+        const overCanvas = (
+            e.clientX >= rect.left && e.clientX <= rect.right &&
+            e.clientY >= rect.top  && e.clientY <= rect.bottom
+        );
+
+        // Update cursor — runs every mousemove so inline style always reflects current tool
+        if (this.isPanning) {
+            this.canvas.style.cursor = 'grabbing';
+        } else if (this.isRotating && this.rotateHandle) {
+            this.canvas.style.cursor = this._getRotateCursor(this.rotateHandle.slice(4));
+        } else if (overCanvas && this.currentTool === 'move' && this.selectedElements.length > 0 && !this.isDragging && !this.isResizing) {
             const handle = this.getResizeHandle(worldPos.x, worldPos.y);
             this.canvas.style.cursor = this.getHandleCursor(handle);
-
-            // Track which rotation corner the mouse is hovering (problem 3)
+            // Track which rotation corner the mouse is hovering
             const newRotCorner = (handle && handle.startsWith('rot-')) ? handle.slice(4) : null;
             if (newRotCorner !== this.hoveredRotCorner) {
                 this.hoveredRotCorner = newRotCorner;
-                this.scheduleRender(); // Redraw to show/hide rotation indicator
+                this.scheduleRender();
             }
-        }
-        // Keep grabbing cursor while rotating
-        if (this.isRotating) {
-            this.canvas.style.cursor = 'grabbing';
+        } else if (overCanvas) {
+            // Enforce tool cursor every frame so CSS inheritance can never override it
+            if (this.spacePressed || this.currentTool === 'hand') {
+                this.canvas.style.cursor = 'grab';
+            } else if (this.currentTool === 'text') {
+                this.canvas.style.cursor = 'text';
+            } else if (this.currentTool === 'pencil') {
+                this.canvas.style.cursor = this._getPencilCursor();
+            } else if (this.currentTool === 'rectangle') {
+                this.canvas.style.cursor = 'crosshair';
+            } else {
+                this.canvas.style.cursor = 'default';
+            }
         }
 
         if (this.isPanning && this.lastMousePos) {
@@ -765,28 +995,11 @@ class CanvasEngine {
                 }
             });
 
-            // Detect frame hover for non-frame elements being dragged
+            // Detect frame hover: attach when the mouse cursor is inside a frame (Figma-style)
             this.highlightedFrame = null;
             const isDraggingNonFrame = this.selectedElements.some(el => el.type !== 'frame');
             if (isDraggingNonFrame) {
-                // Check overlap with frames for the first non-frame selected element
-                const draggedEl = this.selectedElements.find(el => el.type !== 'frame');
-                if (draggedEl) {
-                    let bestFrame = null;
-                    let bestOverlap = 0;
-                    this.elements.forEach(fr => {
-                        if (fr.type !== 'frame') return;
-                        if (this.selectedElements.includes(fr)) return;
-                        const overlap = this.getOverlapPercent(draggedEl, fr);
-                        if (overlap > bestOverlap) {
-                            bestOverlap = overlap;
-                            bestFrame = fr;
-                        }
-                    });
-                    if (bestOverlap > 0.5 && bestFrame) {
-                        this.highlightedFrame = bestFrame;
-                    }
-                }
+                this.highlightedFrame = this.getFrameAt(worldPos.x, worldPos.y, this.selectedElements);
             }
 
             this.render();
@@ -821,7 +1034,8 @@ class CanvasEngine {
                 this.saveState();
                 this.elements.push(this.tempElement);
 
-                // Auto-attach to frame if created inside one
+                // Auto-attach to frame if the element was created fully inside one,
+                // and ensure it sits on top of all other children in that frame.
                 this.updateFrameAttachment(this.tempElement);
 
                 // Auto-switch to Select tool after creating element (except for pencil)
@@ -855,11 +1069,22 @@ class CanvasEngine {
             }
         }
 
-        // Finalize frame attachment after drag
+        // Finalize frame attachment after drag — use mouse cursor position (Figma-style)
         if (this.isDragging) {
+            const rect = this.canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const dropWorld = this.screenToWorld(mx, my);
+            const targetFrame = this.getFrameAt(dropWorld.x, dropWorld.y, this.selectedElements);
+
             this.selectedElements.forEach(el => {
-                if (el.type !== 'frame') {
-                    this.updateFrameAttachment(el);
+                if (el.type === 'frame') {
+                    this.resolveFrameOverlap(el);
+                } else if (targetFrame) {
+                    this.attachToFrame(el, targetFrame);
+                    this.bringToTopOfFrame(el, targetFrame);
+                } else {
+                    this.detachFromFrame(el);
                 }
             });
             this.highlightedFrame = null;
@@ -887,7 +1112,11 @@ class CanvasEngine {
         if (this.spacePressed || this.currentTool === 'hand') {
             this.canvas.style.cursor = 'grab';
         } else if (this.currentTool === 'text') {
-            this.canvas.style.cursor = 'text'; // Restore text cursor
+            this.canvas.style.cursor = 'text';
+        } else if (this.currentTool === 'pencil') {
+            this.canvas.style.cursor = this._getPencilCursor();
+        } else if (this.currentTool === 'rectangle') {
+            this.canvas.style.cursor = 'crosshair';
         } else {
             this.canvas.style.cursor = 'default';
         }
@@ -943,11 +1172,11 @@ class CanvasEngine {
         const y = e.clientY - rect.top;
 
         if (e.ctrlKey || e.metaKey) {
-            // Zoom with Ctrl/Meta + Wheel (or pinch gesture)
-            // Pass rawDelta for smooth trackpad support
-            this.zoom(-e.deltaY, x, y, e.deltaY);
+            // Zoom: Ctrl/Cmd + scroll, or trackpad pinch gesture
+            // Pass rawDelta + deltaMode for smooth proportional zoom
+            this.zoom(-e.deltaY, x, y, e.deltaY, e.deltaMode);
         } else {
-            // Pan with Wheel (or two-finger drag)
+            // Pan with two-finger scroll or mouse wheel
             this.pan(-e.deltaX, -e.deltaY);
         }
     }
@@ -1042,26 +1271,32 @@ class CanvasEngine {
     }
 
     handleKeyDown(e) {
-        // Intercept browser zoom shortcuts (Ctrl/Cmd + =/-/0) — prevent browser zoom,
-        // redirect to canvas zoom instead
-        if ((e.ctrlKey || e.metaKey) && !this.editingText && !this.isInputActive()) {
+        // Intercept browser zoom shortcuts (Ctrl/Cmd + =/-/0) — ALWAYS prevent browser zoom.
+        // Redirect to canvas zoom when not in a text input.
+        if (e.ctrlKey || e.metaKey) {
             if (e.key === '=' || e.key === '+') {
                 e.preventDefault();
-                const cx = this.cssWidth / 2;
-                const cy = this.cssHeight / 2;
-                this.zoom(1, cx, cy);
+                if (!this.editingText && !this.isInputActive()) {
+                    const cx = this.cssWidth / 2;
+                    const cy = this.cssHeight / 2;
+                    this.zoom(1, cx, cy);
+                }
                 return;
             }
             if (e.key === '-') {
                 e.preventDefault();
-                const cx = this.cssWidth / 2;
-                const cy = this.cssHeight / 2;
-                this.zoom(-1, cx, cy);
+                if (!this.editingText && !this.isInputActive()) {
+                    const cx = this.cssWidth / 2;
+                    const cy = this.cssHeight / 2;
+                    this.zoom(-1, cx, cy);
+                }
                 return;
             }
             if (e.key === '0') {
                 e.preventDefault();
-                this.fitToScreen();
+                if (!this.editingText && !this.isInputActive()) {
+                    this.fitToScreen();
+                }
                 return;
             }
         }
@@ -1110,6 +1345,42 @@ class CanvasEngine {
             e.preventDefault();
             this.selectedElements = [...this.elements];
             this.render();
+        }
+
+        // Copy (Cmd+C) — copy selected elements to internal clipboard
+        if ((e.metaKey || e.ctrlKey) && e.key === 'c' && !this.editingText && !this.isInputActive()) {
+            if (this.selectedElements.length > 0) {
+                e.preventDefault();
+                this._copyToClipboard(false);
+            }
+        }
+
+        // Cut (Cmd+X) — copy then delete
+        if ((e.metaKey || e.ctrlKey) && e.key === 'x' && !this.editingText && !this.isInputActive()) {
+            if (this.selectedElements.length > 0) {
+                e.preventDefault();
+                this._copyToClipboard(false);
+                // Delete selected (same logic as Delete key)
+                const toDelete = new Set(this.selectedElements);
+                this.selectedElements.forEach(el => {
+                    if (el.type === 'frame') this.getFrameChildren(el).forEach(c => toDelete.add(c));
+                });
+                this.elements.forEach(el => {
+                    if (el.parentFrame && toDelete.has(el.parentFrame)) toDelete.add(el);
+                });
+                this.elements = this.elements.filter(el => !toDelete.has(el));
+                this.selectedElements = [];
+                this.render();
+                this.saveState();
+            }
+        }
+
+        // Paste (Cmd+V) — paste from internal clipboard
+        if ((e.metaKey || e.ctrlKey) && e.key === 'v' && !this.editingText && !this.isInputActive()) {
+            if (this._clipboard) {
+                e.preventDefault();
+                this._pasteFromClipboard();
+            }
         }
 
         // Undo/Redo - Only if input is NOT active
@@ -1183,13 +1454,15 @@ class CanvasEngine {
         if (e.code === 'Space') {
             this.spacePressed = false;
             if (this.currentTool !== 'hand') {
-                // Restore cursor based on tool
                 if (this.currentTool === 'text') {
                     this.canvas.style.cursor = 'text';
+                } else if (this.currentTool === 'pencil') {
+                    this.canvas.style.cursor = this._getPencilCursor();
+                } else if (this.currentTool === 'rectangle') {
+                    this.canvas.style.cursor = 'crosshair';
                 } else {
                     this.canvas.style.cursor = 'default';
                 }
-                // Restore UI to show current tool
                 this.updateToolUI(this.currentTool);
             }
         }
@@ -1225,6 +1498,11 @@ class CanvasEngine {
             this.canvas.style.cursor = 'grab';
         } else if (tool === 'text') {
             this.canvas.style.cursor = 'text';
+        } else if (tool === 'pencil') {
+            this.canvas.style.cursor = this._getPencilCursor();
+        } else if (tool === 'rectangle') {
+            // Shape tools: crosshair (+) cursor — signals "drag to draw a region"
+            this.canvas.style.cursor = 'crosshair';
         } else {
             this.canvas.style.cursor = 'default';
         }
@@ -1346,11 +1624,15 @@ class CanvasEngine {
 
         this.saveState();
         this.elements.push(frame);
+        this.resolveFrameOverlap(frame);
         this.selectedElements = [frame];
+        frame._justCreated = true;
 
-        // Scroll viewport so the new frame is centered on screen
-        this.scrollToCenter(pos.x, pos.y, frameSize, frameSize);
+        this.scrollToCenter(frame.x, frame.y, frameSize, frameSize);
         this.render();
+
+        // Clear the transient flag after a tick so subsequent selections behave normally
+        requestAnimationFrame(() => { delete frame._justCreated; });
     }
 
     updateToolUI(tool) {
@@ -1425,6 +1707,9 @@ class CanvasEngine {
                 this.saveState();
                 this.elements.push(this.tempElement);
 
+                // Attach to frame if placed inside one, and bring to top of its children
+                this.updateFrameAttachment(this.tempElement);
+
                 this.selectedElements = [this.tempElement];
                 const textElement = this.tempElement;
                 this.tempElement = null;
@@ -1445,11 +1730,8 @@ class CanvasEngine {
                     y: worldY,
                     width: 0,
                     height: 0,
-                    // Line: No fill, Darker Gray Stroke
-                    // Others: Darker Gray Fill, No Stroke
-                    // Using #808080 (Gray)
-                    fill: isLine ? 'none' : '#808080',
-                    stroke: isLine ? '#808080' : 'none',
+                    fill: isLine ? 'none' : '#D9D9D9',
+                    stroke: isLine ? '#D9D9D9' : 'none',
                     strokeWidth: isLine ? 4 : 0,
                     cornerRadius: this.currentShapeType === 'rectangle' ? 0 : undefined
                 };
@@ -1465,8 +1747,8 @@ class CanvasEngine {
                 this.tempElement = {
                     type: 'path',
                     points: [{ x: worldX, y: worldY }],
-                    stroke: '#FF0000',
-                    strokeWidth: 4,
+                    stroke: '#EA5353',
+                    strokeWidth: 6,
                     fill: 'none'
                 };
                 break;
@@ -1749,13 +2031,10 @@ class CanvasEngine {
         if (this.selectedElements.length !== 1) return null;
 
         const element = this.selectedElements[0];
-        // Corner handles: larger hit area (10 screen px)
         const cornerHit = 10 / this.viewport.scale;
-        // Edge handles: respond along the FULL edge length (8 screen px wide zone)
         const edgeHit = 8 / this.viewport.scale;
-        // Rotation zone: outer ring beyond corner handles (10–28 screen px outside corner)
-        const rotOuter = 28 / this.viewport.scale;
-        const rotInner = cornerHit; // start where corner handle ends
+        const rotOuter = 22 / this.viewport.scale;
+        const rotInner = cornerHit;
 
         if (element.type === 'shape' && element.shapeType === 'line') {
             if (Math.abs(worldX - element.x) < cornerHit && Math.abs(worldY - element.y) < cornerHit) return 'nw';
@@ -1763,23 +2042,41 @@ class CanvasEngine {
             return null;
         }
 
-        // Use axis-aligned bounding box for handle detection
-        // If element is rotated, we still check against the AABB corner positions
         const { x, y, width, height } = element;
 
-        // Helper: check if point is in the rotation annular zone at a corner
-        const inRotZone = (cx, cy) => {
+        // Transform mouse into element-local coords (unrotate around center)
+        let lx = worldX, ly = worldY;
+        if (element.rotation && element.rotation !== 0) {
+            const cx = x + width / 2;
+            const cy = y + height / 2;
+            const cos = Math.cos(-element.rotation);
+            const sin = Math.sin(-element.rotation);
             const dx = worldX - cx;
             const dy = worldY - cy;
+            lx = cx + dx * cos - dy * sin;
+            ly = cy + dx * sin + dy * cos;
+        }
+
+        // Frames cannot be rotated (they are axis-aligned layout containers)
+        const isFrame = element.type === 'frame';
+
+        // Only trigger rotation when the mouse is OUTSIDE the element bounds
+        const isOutside = lx < x || lx > x + width || ly < y || ly > y + height;
+
+        const inRotZone = (cornerX, cornerY) => {
+            if (isFrame) return false;  // frames never show rotation handles
+            if (!isOutside) return false;
+            const dx = lx - cornerX;
+            const dy = ly - cornerY;
             const dist = Math.sqrt(dx * dx + dy * dy);
             return dist >= rotInner && dist <= rotOuter;
         };
 
-        // Corners first — highest priority (resize)
-        if (Math.abs(worldX - x) < cornerHit && Math.abs(worldY - y) < cornerHit) return 'nw';
-        if (Math.abs(worldX - (x + width)) < cornerHit && Math.abs(worldY - y) < cornerHit) return 'ne';
-        if (Math.abs(worldX - (x + width)) < cornerHit && Math.abs(worldY - (y + height)) < cornerHit) return 'se';
-        if (Math.abs(worldX - x) < cornerHit && Math.abs(worldY - (y + height)) < cornerHit) return 'sw';
+        // Corners (resize)
+        if (Math.abs(lx - x) < cornerHit && Math.abs(ly - y) < cornerHit) return 'nw';
+        if (Math.abs(lx - (x + width)) < cornerHit && Math.abs(ly - y) < cornerHit) return 'ne';
+        if (Math.abs(lx - (x + width)) < cornerHit && Math.abs(ly - (y + height)) < cornerHit) return 'se';
+        if (Math.abs(lx - x) < cornerHit && Math.abs(ly - (y + height)) < cornerHit) return 'sw';
 
         // Rotation zones — just outside each corner
         if (inRotZone(x, y)) return 'rot-nw';
@@ -1787,21 +2084,24 @@ class CanvasEngine {
         if (inRotZone(x + width, y + height)) return 'rot-se';
         if (inRotZone(x, y + height)) return 'rot-sw';
 
-        // Edges: trigger anywhere along the full edge (excluding the corner zones)
-        const inXRange = worldX >= x + cornerHit && worldX <= x + width - cornerHit;
-        const inYRange = worldY >= y + cornerHit && worldY <= y + height - cornerHit;
+        // Edges
+        const inXRange = lx >= x + cornerHit && lx <= x + width - cornerHit;
+        const inYRange = ly >= y + cornerHit && ly <= y + height - cornerHit;
 
-        if (inXRange && Math.abs(worldY - y) < edgeHit) return 'n';            // top edge
-        if (inXRange && Math.abs(worldY - (y + height)) < edgeHit) return 's'; // bottom edge
-        if (inYRange && Math.abs(worldX - x) < edgeHit) return 'w';            // left edge
-        if (inYRange && Math.abs(worldX - (x + width)) < edgeHit) return 'e'; // right edge
+        if (inXRange && Math.abs(ly - y) < edgeHit) return 'n';
+        if (inXRange && Math.abs(ly - (y + height)) < edgeHit) return 's';
+        if (inYRange && Math.abs(lx - x) < edgeHit) return 'w';
+        if (inYRange && Math.abs(lx - (x + width)) < edgeHit) return 'e';
 
         return null;
     }
 
     getHandleCursor(handle) {
         if (!handle) return 'default';
-        if (handle.startsWith('rot-')) return 'grab';
+        if (handle.startsWith('rot-')) {
+            const corner = handle.slice(4); // 'nw' | 'ne' | 'se' | 'sw'
+            return this._getRotateCursor(corner);
+        }
         const cursors = {
             'nw': 'nw-resize',
             'n': 'n-resize',
@@ -1813,6 +2113,18 @@ class CanvasEngine {
             'w': 'w-resize'
         };
         return cursors[handle] || 'default';
+    }
+
+    _getRotateCursor(corner) {
+        const degMap = { nw: 0, ne: 90, se: 180, sw: 270 };
+        let deg = degMap[corner] ?? 0;
+        // Add the element's own rotation so the cursor follows the rotated corners
+        const el = this.selectedElements[0];
+        if (el && el.rotation) {
+            deg += el.rotation * (180 / Math.PI);
+        }
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"><g transform="rotate(${deg} 12 12)"><path d="M7 17Q3 3 17 7" stroke="#000" stroke-width="1.8" fill="none" stroke-linecap="round"/><path d="M5 14.5L7 17L9.5 15" stroke="#000" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 9.5L17 7L14.5 5" stroke="#000" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g></svg>`;
+        return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 12 12, pointer`;
     }
 
     triggerImageUpload(worldX, worldY) {
@@ -1898,6 +2210,11 @@ class CanvasEngine {
             this.elements.push(element);
             newElements.push(element);
 
+            // Auto-describe image for layer naming
+            if (window.GenPanel && window.GenPanel.describeImageElement) {
+                window.GenPanel.describeImageElement(element);
+            }
+
             // Track max height in current row
             maxHeightInRow = Math.max(maxHeightInRow, imgData.height);
 
@@ -1920,62 +2237,100 @@ class CanvasEngine {
     startTextEditing(element) {
         if (element.type !== 'text') return;
 
-        this.editingText = element;
+        if (this.editingText === element) return;
 
-        // Create input overlay positioned to match the canvas element exactly
+        // Finish any current text editing session first
+        if (this.textInput) {
+            this.textInput.blur();
+        }
+
+        this.editingText = element;
+        const originalText = element.text;
+        element._editing = true;
+
         const input = document.createElement('textarea');
         input.value = element.text;
         input.style.position = 'fixed';
 
-        // Must include the canvas's own offset on the page
-        const canvasRect = this.canvas.getBoundingClientRect();
-        const screenPos = this.worldToScreen(element.x, element.y);
-        const scaledFontSize = element.fontSize * this.viewport.scale;
-        const scaledWidth = Math.max(element.width * this.viewport.scale, scaledFontSize * 3);
-        const scaledHeight = Math.max(element.height * this.viewport.scale, scaledFontSize * 1.5);
+        const worldPadding = 5;
 
-        input.style.left = (canvasRect.left + screenPos.x) + 'px';
-        input.style.top = (canvasRect.top + screenPos.y) + 'px';
-        input.style.width = scaledWidth + 'px';
-        input.style.height = scaledHeight + 'px';
-        input.style.fontSize = scaledFontSize + 'px';
-        input.style.fontFamily = element.fontFamily;
-        input.style.color = element.color;
-        input.style.background = 'rgba(255,255,255,0.92)';
-        input.style.border = '1.5px solid #0099B8';
-        input.style.borderRadius = '3px';
+        const measureCanvas = document.createElement('canvas');
+        const measureCtx = measureCanvas.getContext('2d');
+
+        const updatePositionAndSize = () => {
+            if (!this.editingText || this.editingText !== element) return;
+
+            const scale = this.viewport.scale;
+            const scaledPadding = worldPadding * scale;
+            const screenPos = this.worldToScreen(element.x, element.y);
+            const scaledFontSize = Math.max(1, element.fontSize * scale);
+
+            input.style.left = (screenPos.x + scaledPadding) + 'px';
+            input.style.top = (screenPos.y + scaledPadding) + 'px';
+            input.style.fontSize = scaledFontSize + 'px';
+
+            const lines = (input.value || '').split('\n');
+            const lineHeight = scaledFontSize * 1.2;
+
+            measureCtx.font = `${scaledFontSize}px ${element.fontFamily || 'Inter, sans-serif'}`;
+            let maxLineWidth = scaledFontSize * 2;
+            lines.forEach(line => {
+                maxLineWidth = Math.max(maxLineWidth, measureCtx.measureText(line || ' ').width);
+            });
+
+            input.style.width = (maxLineWidth + scaledFontSize) + 'px';
+            input.style.height = Math.max(lineHeight, lines.length * lineHeight + 4) + 'px';
+        };
+
+        input.style.fontFamily = element.fontFamily || 'Inter, sans-serif';
+        input.style.color = element.color || '#000000';
+        input.style.background = 'transparent';
+        input.style.border = 'none';
         input.style.outline = 'none';
         input.style.resize = 'none';
-        input.style.padding = '4px';
+        input.style.padding = '0';
+        input.style.margin = '0';
         input.style.lineHeight = '1.2';
         input.style.boxSizing = 'border-box';
         input.style.zIndex = '10000';
         input.style.overflow = 'hidden';
+        input.style.whiteSpace = 'pre';
+        input.style.caretColor = '#0099B8';
 
         this.textInput = input;
+        this._textUpdatePosition = updatePositionAndSize;
         document.body.appendChild(input);
+        updatePositionAndSize();
         input.focus();
-        // Select all text immediately so user can type to replace or edit
         setTimeout(() => {
             input.select();
+            updatePositionAndSize();
         }, 0);
 
+        input.addEventListener('input', () => {
+            element.text = input.value || '';
+            this.fitTextElement(element);
+            updatePositionAndSize();
+            this.render();
+        });
+
+        let finished = false;
         const finishEditing = () => {
-            const newText = input.value.trim();
-            if (!newText) {
-                // Remove empty text element
+            if (finished) return;
+            finished = true;
+            delete element._editing;
+            this._textUpdatePosition = null;
+
+            const newText = input.value;
+            if (!newText.trim()) {
                 const index = this.elements.indexOf(element);
-                if (index > -1) {
-                    this.elements.splice(index, 1);
-                }
+                if (index > -1) this.elements.splice(index, 1);
             } else {
-                element.text = input.value;
+                element.text = newText;
                 this.fitTextElement(element);
             }
 
-            if (document.body.contains(input)) {
-                document.body.removeChild(input);
-            }
+            if (document.body.contains(input)) document.body.removeChild(input);
             this.textInput = null;
             this.editingText = null;
             this.render();
@@ -1983,21 +2338,30 @@ class CanvasEngine {
 
         input.addEventListener('blur', finishEditing);
         input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                // Confirm on Enter (without Shift)
-                e.preventDefault();
-                finishEditing();
-            } else if (e.key === 'Escape') {
-                finishEditing();
+            e.stopPropagation();
+            if (e.key === 'Escape') {
+                element.text = originalText;
+                finished = true;
+                delete element._editing;
+                this._textUpdatePosition = null;
+                if (document.body.contains(input)) document.body.removeChild(input);
+                this.textInput = null;
+                this.editingText = null;
+                this.fitTextElement(element);
+                this.render();
             }
         });
+
+        this.render();
     }
 
     stopTextEditing() {
         if (this.textInput && this.editingText) {
+            delete this.editingText._editing;
+            this._textUpdatePosition = null;
+
             const newText = this.textInput.value.trim();
             if (!newText) {
-                // Remove empty text element
                 const index = this.elements.indexOf(this.editingText);
                 if (index > -1) {
                     this.elements.splice(index, 1);
@@ -2007,9 +2371,10 @@ class CanvasEngine {
                 this.fitTextElement(this.editingText);
             }
 
-            document.body.removeChild(this.textInput);
+            const inputEl = this.textInput;
             this.textInput = null;
             this.editingText = null;
+            if (document.body.contains(inputEl)) document.body.removeChild(inputEl);
             this.render();
         }
     }
@@ -2037,15 +2402,22 @@ class CanvasEngine {
                 const dist = this.pointToLineDistance(worldX, worldY, el.x, el.y, el.x2, el.y2);
                 if (dist < threshold) return el;
             } else if (el.type === 'path') {
-                const bounds = this.getPathBounds(el);
-                const padding = 5 / this.viewport.scale;
-                if (worldX >= bounds.x - padding && worldX <= bounds.x + bounds.width + padding &&
-                    worldY >= bounds.y - padding && worldY <= bounds.y + bounds.height + padding) {
-                    return el;
-                }
+                if (this.isPointOnPath(el, worldX, worldY)) return el;
             } else {
-                if (worldX >= el.x && worldX <= el.x + el.width &&
-                    worldY >= el.y && worldY <= el.y + el.height) {
+                // Unrotate point into element-local space if rotated
+                let lx = worldX, ly = worldY;
+                if (el.rotation && el.rotation !== 0 && el.width !== undefined) {
+                    const cx = el.x + el.width / 2;
+                    const cy = el.y + el.height / 2;
+                    const cos = Math.cos(-el.rotation);
+                    const sin = Math.sin(-el.rotation);
+                    const dx = worldX - cx;
+                    const dy = worldY - cy;
+                    lx = cx + dx * cos - dy * sin;
+                    ly = cy + dx * sin + dy * cos;
+                }
+                if (lx >= el.x && lx <= el.x + el.width &&
+                    ly >= el.y && ly <= el.y + el.height) {
                     return el;
                 }
             }
@@ -2113,6 +2485,10 @@ class CanvasEngine {
         this.ctx.save();
         this.ctx.scale(dpr, dpr);
 
+        // High-quality image interpolation for sharp rendering
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+
         // Clear canvas (in CSS pixels)
         this.ctx.fillStyle = '#EAEFF5';
         this.ctx.fillRect(0, 0, this.cssWidth || this.canvas.width, this.cssHeight || this.canvas.height);
@@ -2127,10 +2503,12 @@ class CanvasEngine {
 
         // Render elements with frame clipping
         // 1. Render non-parented, non-frame elements first (below frames)
+        //    Unparented paths are deferred to pass 3 (top layer)
         this.elements.forEach(el => {
             if (el === this.tempElement) return;
             if (el.type === 'frame') return;
-            if (el.parentFrame) return; // Skip children, rendered with their frame
+            if (el.type === 'path' && !el.parentFrame) return;
+            if (el.parentFrame) return;
             this.renderElement(el);
         });
 
@@ -2171,6 +2549,25 @@ class CanvasEngine {
             if (el._generating) {
                 this.renderFrameLoadingOverlay(el);
             }
+        });
+
+        // Render selected frame children unclipped with reduced opacity
+        // so the user can see parts extending outside the frame
+        this.selectedElements.forEach(el => {
+            if (el.parentFrame && el !== this.tempElement) {
+                this.ctx.save();
+                this.ctx.globalAlpha = 0.35;
+                this.renderElement(el);
+                this.ctx.restore();
+            }
+        });
+
+        // 3. Render pencil paths on top of frames (always top-layer)
+        this.elements.forEach(el => {
+            if (el === this.tempElement) return;
+            if (el.type !== 'path') return;
+            if (el.parentFrame) return; // Orphaned frame children still clipped (shouldn't happen)
+            this.renderElement(el);
         });
 
         // Render temporary element
@@ -2312,6 +2709,11 @@ class CanvasEngine {
         this.ctx.restore(); // viewport transform
         this.ctx.restore(); // DPR scale
 
+        // Sync text editing overlay position with current viewport
+        if (this._textUpdatePosition) {
+            this._textUpdatePosition();
+        }
+
         // Notify selection change
         if (this.onSelectionChange) {
             this.onSelectionChange(this.selectedElements);
@@ -2413,8 +2815,10 @@ class CanvasEngine {
                     this.ctx.fillStyle = isSelected ? selectedNameColor : labelColor;
                     this.ctx.fillText(el.name || 'Frame', Math.round(leftScreen.x), Math.round(textY));
 
-                    // 2. Dimensions (Right) — actual image resolution in px if frame has image, else frame size
-                    const childImage = this.elements.find(e => e.type === 'image' && e.parentFrame === el);
+                    // 2. Dimensions (Right) — actual image resolution in px if frame has image, else frame size.
+                    // Use the LAST image child so we always show the most recently generated image size.
+                    const childImages = this.elements.filter(e => e.type === 'image' && e.parentFrame === el);
+                    const childImage = childImages.length ? childImages[childImages.length - 1] : null;
                     const dimLabel = childImage?.image?.naturalWidth
                         ? this._getDimLabel(childImage.image.naturalWidth, childImage.image.naturalHeight)
                         : this._getDimLabel(el.width, el.height);
@@ -2458,16 +2862,30 @@ class CanvasEngine {
                 break;
 
             case 'path':
+                if (!el.points || el.points.length === 0) break;
                 this.ctx.beginPath();
-                el.points.forEach((p, i) => {
-                    if (i === 0) this.ctx.moveTo(p.x, p.y);
-                    else this.ctx.lineTo(p.x, p.y);
-                });
-                this.ctx.strokeStyle = el.stroke;
-                this.ctx.lineWidth = el.strokeWidth;
-                this.ctx.lineCap = 'round';
-                this.ctx.lineJoin = 'round';
-                this.ctx.stroke();
+                if (el.points.length === 1) {
+                    // Single dot
+                    const r = (el.strokeWidth || 6) / 2;
+                    this.ctx.arc(el.points[0].x, el.points[0].y, r, 0, Math.PI * 2);
+                    this.ctx.fillStyle = el.stroke;
+                    this.ctx.fill();
+                } else {
+                    // Smooth curve through points using quadratic bezier
+                    this.ctx.moveTo(el.points[0].x, el.points[0].y);
+                    for (let i = 1; i < el.points.length - 1; i++) {
+                        const mx = (el.points[i].x + el.points[i + 1].x) / 2;
+                        const my = (el.points[i].y + el.points[i + 1].y) / 2;
+                        this.ctx.quadraticCurveTo(el.points[i].x, el.points[i].y, mx, my);
+                    }
+                    const last = el.points[el.points.length - 1];
+                    this.ctx.lineTo(last.x, last.y);
+                    this.ctx.strokeStyle = el.stroke;
+                    this.ctx.lineWidth = el.strokeWidth || 6;
+                    this.ctx.lineCap = 'round';
+                    this.ctx.lineJoin = 'round';
+                    this.ctx.stroke();
+                }
                 break;
         }
 
@@ -2585,6 +3003,8 @@ class CanvasEngine {
     }
 
     renderSelection(el) {
+        if (el === this.editingText) return;
+
         this.ctx.save();
 
         // Apply same rotation transform as renderElement so selection aligns with rotated element
@@ -2695,79 +3115,9 @@ class CanvasEngine {
         this.ctx.restore();
     }
 
-    drawRotationHandles(el, onlyCorner = null) {
-        // Draw a small curved arrow arc outside each corner to indicate rotation is available.
-        // onlyCorner: if provided ('nw'|'ne'|'se'|'sw'), only draw that corner.
-        // If null, nothing is drawn (rotation hints shown on demand only).
-        if (onlyCorner === null) return;  // No hover — don't show anything
-
-        const arcRadius = 10 / this.viewport.scale;
-        const arcGap = 5 / this.viewport.scale;   // gap between corner handle and arc start
-        const arcSweep = Math.PI / 2.5;            // ~72° arc sweep
-        const arrowSize = 4 / this.viewport.scale;
-
-        this.ctx.save();
-        this.ctx.strokeStyle = 'rgba(0, 153, 184, 0.85)';
-        this.ctx.lineWidth = 2 / this.viewport.scale;
-        this.ctx.lineCap = 'round';
-        this.ctx.setLineDash([]);
-
-        const allCorners = [
-            {
-                id: 'nw', x: el.x, y: el.y,              // NW corner
-                startAngle: Math.PI, endAngle: Math.PI + arcSweep, arrowDir: 1
-            },
-            {
-                id: 'ne', x: el.x + el.width, y: el.y,              // NE corner
-                startAngle: -Math.PI / 2 - arcSweep / 2, endAngle: -Math.PI / 2 + arcSweep / 2, arrowDir: 1
-            },
-            {
-                id: 'se', x: el.x + el.width, y: el.y + el.height,  // SE corner
-                startAngle: 0, endAngle: arcSweep, arrowDir: 1
-            },
-            {
-                id: 'sw', x: el.x, y: el.y + el.height,  // SW corner
-                startAngle: Math.PI / 2 - arcSweep / 2, endAngle: Math.PI / 2 + arcSweep / 2, arrowDir: 1
-            }
-        ];
-
-        const offsets = [
-            { dx: -1, dy: -1 },  // NW
-            { dx: 1, dy: -1 },  // NE
-            { dx: 1, dy: 1 },  // SE
-            { dx: -1, dy: 1 },  // SW
-        ];
-
-        allCorners.forEach((corner, idx) => {
-            if (corner.id !== onlyCorner) return; // Only draw hovered corner
-
-            const diag = arcRadius + arcGap;
-            const off = offsets[idx];
-            const cx = corner.x + off.dx * diag;
-            const cy = corner.y + off.dy * diag;
-
-            this.ctx.beginPath();
-            this.ctx.arc(cx, cy, arcRadius, corner.startAngle, corner.endAngle, false);
-            this.ctx.stroke();
-
-            // Draw arrowhead at end of arc
-            const endX = cx + arcRadius * Math.cos(corner.endAngle);
-            const endY = cy + arcRadius * Math.sin(corner.endAngle);
-            const tangentAngle = corner.endAngle + Math.PI / 2;
-            this.ctx.beginPath();
-            this.ctx.moveTo(
-                endX + arrowSize * Math.cos(tangentAngle - 0.5),
-                endY + arrowSize * Math.sin(tangentAngle - 0.5)
-            );
-            this.ctx.lineTo(endX, endY);
-            this.ctx.lineTo(
-                endX + arrowSize * Math.cos(tangentAngle + 0.5),
-                endY + arrowSize * Math.sin(tangentAngle + 0.5)
-            );
-            this.ctx.stroke();
-        });
-
-        this.ctx.restore();
+    drawRotationHandles(_el, _corner) {
+        // Rotation intent is communicated entirely through the cursor (_getRotateCursor).
+        // No canvas overlay is drawn.
     }
 
     // ==================== Frame Container Logic ====================
@@ -2793,10 +3143,17 @@ class CanvasEngine {
 
     // Calculate what percentage of element's area is inside a frame
     getOverlapPercent(element, frame) {
-        const elLeft = element.x;
-        const elRight = element.x + element.width;
-        const elTop = element.y;
-        const elBottom = element.y + element.height;
+        let elLeft, elRight, elTop, elBottom;
+        if (element.type === 'path' && element.points && element.points.length) {
+            const b = this.getPathBounds(element);
+            elLeft = b.x; elRight = b.x + b.width;
+            elTop = b.y; elBottom = b.y + b.height;
+        } else {
+            elLeft = element.x;
+            elRight = element.x + (element.width || 0);
+            elTop = element.y;
+            elBottom = element.y + (element.height || 0);
+        }
 
         const frLeft = frame.x;
         const frRight = frame.x + frame.width;
@@ -2820,6 +3177,45 @@ class CanvasEngine {
         return overlapArea / elementArea;
     }
 
+    // Push a frame so it doesn't overlap any other frame.
+    resolveFrameOverlap(frame) {
+        const gap = 30;
+        const oldX = frame.x, oldY = frame.y;
+        const otherFrames = this.elements.filter(el => el.type === 'frame' && el !== frame);
+
+        for (let iter = 0; iter < 5; iter++) {
+            let pushed = false;
+            for (const other of otherFrames) {
+                const overlapX = Math.min(frame.x + frame.width, other.x + other.width) - Math.max(frame.x, other.x);
+                const overlapY = Math.min(frame.y + frame.height, other.y + other.height) - Math.max(frame.y, other.y);
+                if (overlapX <= 0 || overlapY <= 0) continue;
+
+                const cx = frame.x + frame.width / 2;
+                const cy = frame.y + frame.height / 2;
+                const ocx = other.x + other.width / 2;
+                const ocy = other.y + other.height / 2;
+
+                if (overlapX < overlapY) {
+                    frame.x += cx < ocx ? -(overlapX + gap) : (overlapX + gap);
+                } else {
+                    frame.y += cy < ocy ? -(overlapY + gap) : (overlapY + gap);
+                }
+                pushed = true;
+            }
+            if (!pushed) break;
+        }
+
+        // Move children by the total displacement
+        const totalDx = frame.x - oldX;
+        const totalDy = frame.y - oldY;
+        if (totalDx !== 0 || totalDy !== 0) {
+            this.getFrameChildren(frame).forEach(child => {
+                child.x += totalDx;
+                child.y += totalDy;
+            });
+        }
+    }
+
     // Attach element to a frame
     attachToFrame(element, frame) {
         if (element === frame) return; // Can't parent to self
@@ -2832,27 +3228,42 @@ class CanvasEngine {
         delete element.parentFrame;
     }
 
-    // Check and update frame attachment for an element based on 50% overlap rule
+    // Check and update frame attachment for an element based on 50% overlap rule.
+    // For zero-size or near-zero elements (e.g. freshly placed text before any typing),
+    // fall back to a point-in-frame test using the element's (x, y) origin so they still
+    // attach correctly even when their area hasn't been computed yet.
     updateFrameAttachment(element) {
-        if (element.type === 'frame') return; // Frames don't attach to other frames
+        if (element.type === 'frame') return;
 
         let bestFrame = null;
         let bestOverlap = 0;
 
-        // Find the frame with the most overlap
+        const elArea = (element.width || 0) * (element.height || 0);
+
         this.elements.forEach(el => {
             if (el.type !== 'frame') return;
             if (el === element) return;
-            const overlap = this.getOverlapPercent(element, el);
-            if (overlap > bestOverlap) {
-                bestOverlap = overlap;
+
+            let score;
+            if (elArea > 0) {
+                // Normal case: use area-overlap ratio
+                score = this.getOverlapPercent(element, el);
+            } else {
+                // Zero-size element (e.g. new text): test if origin point is inside frame
+                const px = element.x, py = element.y;
+                score = (px >= el.x && px <= el.x + el.width &&
+                         py >= el.y && py <= el.y + el.height) ? 1 : 0;
+            }
+
+            if (score > bestOverlap) {
+                bestOverlap = score;
                 bestFrame = el;
             }
         });
 
         if (bestOverlap > 0.5 && bestFrame) {
             this.attachToFrame(element, bestFrame);
-            // Ensure new element renders on TOP: move it to after all existing children of this frame
+            // Ensure new element renders on top of all existing children of this frame
             this.bringToTopOfFrame(element, bestFrame);
         } else {
             this.detachFromFrame(element);
@@ -2887,53 +3298,65 @@ class CanvasEngine {
         const hasImage = this.elements.some(
             child => child.parentFrame === el && child.type === 'image'
         );
+        const s = this.viewport.scale;
+        const ctx = this.ctx;
 
-        this.ctx.save();
-        this.ctx.beginPath();
-        this.ctx.rect(el.x, el.y, el.width, el.height);
-        this.ctx.clip();
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(el.x, el.y, el.width, el.height);
+        ctx.clip();
 
-        if (hasImage) {
-            // Replace mode: semi-transparent white overlay on existing image
-            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
-        } else {
-            // Empty frame: light tinted overlay
-            this.ctx.fillStyle = 'rgba(7, 50, 71, 0.06)';
-        }
-        this.ctx.fillRect(el.x, el.y, el.width, el.height);
+        // ── Background: white + subtle brand-cyan radial gradient ───────────────
+        // A soft radial glow emanates from the centre, breathing in sync with the bars.
+        // Global breathe cycle: ~4 s (natural resting breath pace)
+        const BREATHE_HZ = 0.25;  // 0.25 cycles/s → 4 s period, slow & calm
+        const breathe    = (Math.sin(t * BREATHE_HZ * Math.PI * 2 - Math.PI / 2) + 1) / 2; // 0…1, starts at 0
 
-        // Subtle shimmer: a sweeping gradient band
-        const shimmerW = el.width * 0.6;
-        const cycle = 2.0; // seconds per sweep
-        const progress = (t % cycle) / cycle;
-        const shimmerX = el.x - shimmerW + (el.width + shimmerW * 2) * progress;
-
-        const grad = this.ctx.createLinearGradient(shimmerX, el.y, shimmerX + shimmerW, el.y);
-        grad.addColorStop(0, 'rgba(255, 255, 255, 0)');
-        grad.addColorStop(0.3, 'rgba(0, 200, 210, 0.08)');
-        grad.addColorStop(0.5, 'rgba(0, 200, 210, 0.12)');
-        grad.addColorStop(0.7, 'rgba(0, 200, 210, 0.08)');
-        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-        this.ctx.fillStyle = grad;
-        this.ctx.fillRect(el.x, el.y, el.width, el.height);
-
-        // Subtle pulsing dots in center
-        const cx = el.x + el.width / 2;
+        const cx = el.x + el.width  / 2;
         const cy = el.y + el.height / 2;
-        const dotCount = 3;
-        const dotSpacing = 16 / this.viewport.scale;
-        const dotRadius = 3 / this.viewport.scale;
-        for (let i = 0; i < dotCount; i++) {
-            const dx = cx + (i - 1) * dotSpacing;
-            const phase = t * 3 + i * 0.6;
-            const alpha = 0.15 + 0.2 * Math.sin(phase);
-            this.ctx.beginPath();
-            this.ctx.arc(dx, cy, dotRadius, 0, Math.PI * 2);
-            this.ctx.fillStyle = `rgba(0, 200, 210, ${alpha})`;
-            this.ctx.fill();
+
+        // Solid base
+        ctx.fillStyle = hasImage ? 'rgba(255,255,255,0.78)' : 'rgba(244,253,254,0.84)';
+        ctx.fillRect(el.x, el.y, el.width, el.height);
+
+        // Radial brand-cyan glow, radius breathes gently
+        const glowR     = Math.max(el.width, el.height) * (0.55 + 0.15 * breathe);
+        const glowAlpha = 0.06 + 0.07 * breathe;   // 0.06 … 0.13 — very subtle
+        const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+        grd.addColorStop(0,   `rgba(0, 204, 220, ${(glowAlpha * 1.6).toFixed(3)})`);
+        grd.addColorStop(0.5, `rgba(0, 204, 220, ${glowAlpha.toFixed(3)})`);
+        grd.addColorStop(1,   'rgba(0, 204, 220, 0)');
+        ctx.fillStyle = grd;
+        ctx.fillRect(el.x, el.y, el.width, el.height);
+
+        // ── Three vertical bars, EQ / breath style ───────────────────────────────
+        const BAR_COUNT  = 3;
+        // Slightly thinner bars: cap at 4 instead of 6
+        const BAR_W      = Math.max(1.5, Math.min(4,  el.width  * 0.018)) / s;
+        const BAR_GAP    = Math.max(3,   Math.min(10, el.width  * 0.04))  / s;
+        const BAR_MAX_H  = Math.max(8,   Math.min(32, el.height * 0.11))  / s;
+        const BAR_MIN_H  = BAR_MAX_H * 0.22;
+        // Same slow pace as the glow — each bar offset 120° so they stagger
+        const PHASE_STEP = (Math.PI * 2) / BAR_COUNT;
+
+        ctx.lineCap = 'round';
+
+        for (let i = 0; i < BAR_COUNT; i++) {
+            const raw  = Math.sin(t * BREATHE_HZ * Math.PI * 2 + i * PHASE_STEP - Math.PI / 2);
+            const norm = (raw + 1) / 2;  // 0 … 1
+            const h    = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * norm;
+            const bx   = cx + (i - (BAR_COUNT - 1) / 2) * (BAR_W + BAR_GAP);
+            const alpha = 0.38 + 0.55 * norm;  // 0.38 … 0.93
+
+            ctx.beginPath();
+            ctx.moveTo(bx, cy - h / 2);
+            ctx.lineTo(bx, cy + h / 2);
+            ctx.strokeStyle = `rgba(0, 204, 220, ${alpha.toFixed(3)})`;
+            ctx.lineWidth   = BAR_W;
+            ctx.stroke();
         }
 
-        this.ctx.restore();
+        ctx.restore();
     }
 
     /**
@@ -3013,5 +3436,31 @@ class CanvasEngine {
             width: maxX - minX,
             height: maxY - minY
         };
+    }
+
+    // Check if world point is within stroke distance of a pencil path
+    isPointOnPath(path, worldX, worldY) {
+        if (!path.points || path.points.length === 0) return false;
+        const threshold = Math.max((path.strokeWidth || 2) / 2 + 3, 5) / this.viewport.scale;
+        if (path.points.length === 1) {
+            const p = path.points[0];
+            return Math.hypot(worldX - p.x, worldY - p.y) <= threshold;
+        }
+        for (let i = 0; i < path.points.length - 1; i++) {
+            const p1 = path.points[i];
+            const p2 = path.points[i + 1];
+            if (this.pointToLineDistance(worldX, worldY, p1.x, p1.y, p2.x, p2.y) <= threshold) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Returns a pencil-shaped CSS cursor data URI.
+    // SVG must be fully percent-encoded so the url() value is unambiguous in all browsers.
+    _getPencilCursor() {
+        // Single-quote attrs + encodeURIComponent avoids quote-nesting and angle-bracket issues.
+        const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z' fill='%23073247'/></svg>`;
+        return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 0 24, crosshair`;
     }
 }

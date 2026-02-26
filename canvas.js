@@ -18,13 +18,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let _isLoadingProject = false;
     let _autosaveTimer = null;  // must be declared here so scheduleAutosave & beforeunload share it
+    let _pendingVisibilitySave = false;
+
+    function getProjectName() {
+        return projectNameInput ? projectNameInput.value.trim() || 'Untitled Project' : 'Untitled Project';
+    }
 
     function scheduleAutosave() {
         if (_isLoadingProject) return;
         clearTimeout(_autosaveTimer);
         _autosaveTimer = setTimeout(async () => {
-            const name = projectNameInput ? projectNameInput.value.trim() || 'Untitled Project' : 'Untitled Project';
-            await ProjectManager.save(projectId, name, engine.elements, engine.viewport, engine.canvas);
+            await ProjectManager.save(projectId, getProjectName(), engine.elements, engine.viewport, engine.canvas);
         }, 1500);
     }
 
@@ -35,26 +39,58 @@ document.addEventListener('DOMContentLoaded', () => {
         scheduleAutosave();
     };
 
-    // Best-effort save on page unload (fire-and-forget, reuses existing thumbnail)
-    window.addEventListener('beforeunload', () => {
+    // ── Primary save-on-hide: fires when tab loses focus, user switches away, or
+    // the browser is about to unload the page.  Unlike beforeunload, this fires
+    // early enough for async IndexedDB writes to complete.
+    // This handles Cmd+R, Cmd+W, tab switching, and most navigation cases.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'hidden') return;
+        if (_isLoadingProject) return;
         clearTimeout(_autosaveTimer);
-        const name = projectNameInput ? projectNameInput.value.trim() || 'Untitled Project' : 'Untitled Project';
-        ProjectManager.saveAndForget(projectId, name, engine.elements, engine.viewport);
+        _pendingVisibilitySave = true;
+        ProjectManager.save(projectId, getProjectName(), engine.elements, engine.viewport, engine.canvas)
+            .finally(() => { _pendingVisibilitySave = false; });
     });
 
-    // Load existing project data (async, runs after the rest of the init)
-    async function initProject() {
-        const project = await ProjectManager.load(projectId);
-        if (!project || !project.elements || project.elements.length === 0) return;
+    // ── Fallback for cases where visibilitychange doesn't fire reliably
+    // (e.g. Cmd+Shift+R hard-refresh in some browsers).  saveAndForget uses the
+    // already-serialised data path so it's as fast as possible synchronously.
+    window.addEventListener('beforeunload', () => {
+        if (_isLoadingProject) return;
+        if (_pendingVisibilitySave) return; // visibilitychange already handled it
+        clearTimeout(_autosaveTimer);
+        ProjectManager.saveAndForget(projectId, getProjectName(), engine.elements, engine.viewport);
+    });
 
+    function applyViewport(viewport) {
+        if (!viewport) return false;
+        const { x: vx, y: vy, scale: vs } = viewport;
+        if (vs && vs > 0 && (vx !== 0 || vy !== 0)) {
+            engine.viewport.x = vx;
+            engine.viewport.y = vy;
+            engine.viewport.scale = vs;
+            const testEl = engine.elements.find(e => e.x !== undefined && e.width !== undefined);
+            if (testEl) {
+                const s1 = engine.worldToScreen(testEl.x, testEl.y);
+                const s2 = engine.worldToScreen(testEl.x + testEl.width, testEl.y + testEl.height);
+                if (s2.x > 0 && s1.x < engine.cssWidth && s2.y > 0 && s1.y < engine.cssHeight) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    async function initProject() {
         _isLoadingProject = true;
         try {
+            const project = await ProjectManager.load(projectId);
+            if (!project || !project.elements || project.elements.length === 0) return;
+
             engine.elements = project.elements;
-            if (project.viewport) {
-                engine.viewport.x = project.viewport.x;
-                engine.viewport.y = project.viewport.y;
-                engine.viewport.scale = project.viewport.scale;
-            }
+            if (!applyViewport(project.viewport)) engine.fitToScreen();
             if (projectNameInput && project.name) {
                 projectNameInput.value = project.name;
                 document.title = project.name + ' - AI Design';
@@ -64,16 +100,31 @@ document.addEventListener('DOMContentLoaded', () => {
             _isLoadingProject = false;
         }
     }
-    // ==================== Auth: resolve user BEFORE loading project ====================
-    // Critical: must set correct userId key before initProject reads localStorage
+
+    // ==================== Auth + Project Load ====================
+    // getSession() reads from local storage (no network round-trip), so auth
+    // resolution is fast and does not delay the initial canvas render.
     (async () => {
+        // Resolve auth first (uses local session cache — very fast)
         if (typeof getCurrentUser === 'function') {
             try {
                 const user = await getCurrentUser();
                 if (user?.id) await ProjectManager.setUserId(user.id);
             } catch { }
         }
+
+        // Load project from IndexedDB (images awaited inside deserializeElements)
         await initProject();
+
+        // Resume any generation that was interrupted by a page refresh
+        if (projectId && window.GenPanel && window.GenPanel.resumePending) {
+            // Delay slightly so canvas-gen.js has time to finish initialising
+            setTimeout(() => {
+                if (window.GenPanel && window.GenPanel.resumePending) {
+                    window.GenPanel.resumePending(projectId);
+                }
+            }, 400);
+        }
 
         // Auto-generation from homepage prompt
         const autoGen = urlParams.get('autoGen');
@@ -473,9 +524,9 @@ document.addEventListener('DOMContentLoaded', () => {
         line: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="3.5" y1="16.5" x2="16.5" y2="3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
     };
 
-    // Restore last-used shape from localStorage
+    // Shape always resets to rectangle on each page load — no persistence
     const SHAPE_STORAGE_KEY = 'canvas_last_shape';
-    const savedShape = localStorage.getItem(SHAPE_STORAGE_KEY) || 'rectangle';
+    localStorage.removeItem(SHAPE_STORAGE_KEY); // clear any stale value
     const rectangleBtn = document.querySelector('.tool-btn[data-tool="rectangle"]');
 
     function applyShapeToButton(shapeType) {
@@ -494,13 +545,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // If no tooltip yet (e.g. called before tooltip init), it will be added by the tooltip init loop
     }
 
-    // Apply saved shape on load — defer until after tooltip init runs
-    window._applyInitialShape = () => {
-        if (savedShape !== 'rectangle') {
-            engine.setShapeType(savedShape);
-            applyShapeToButton(savedShape);
-        }
-    };
+    // No saved shape to apply — always start as rectangle
+    window._applyInitialShape = () => {};
 
     // Shape Menu
     if (shapeMenu) {
@@ -518,9 +564,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Update button icon to reflect chosen shape
             applyShapeToButton(shapeType);
-
-            // Persist selection
-            localStorage.setItem(SHAPE_STORAGE_KEY, shapeType);
 
             // Update active state
             toolButtons.forEach(b => b.classList.remove('active'));
@@ -590,12 +633,36 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // Tab: open & focus the gen-panel input when elements are selected
+        // Tab: zoom + center selection so content and gen-panel are both visible
         if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey &&
             !engine.editingText && !engine.isInputActive()) {
             if (engine.selectedElements && engine.selectedElements.length > 0) {
                 e.preventDefault();
-                // Delegate to canvas-gen: expand the active panel and focus editor
+
+                // If all selected elements belong to the same parent frame,
+                // fit the entire frame (not just the selection).
+                let fitTarget = engine.selectedElements;
+                const parentFrames = new Set();
+                let allHaveParent = true;
+                for (const el of engine.selectedElements) {
+                    if (el.parentFrame) {
+                        parentFrames.add(el.parentFrame);
+                    } else if (el.type !== 'frame') {
+                        allHaveParent = false;
+                    }
+                }
+                if (allHaveParent && parentFrames.size === 1) {
+                    const parentFrame = [...parentFrames][0];
+                    fitTarget = [parentFrame];
+                }
+
+                engine.fitToElements(fitTarget, {
+                    padTop: 80,
+                    padBottom: 220,
+                    padLeft: 88,
+                    padRight: 60,
+                    maxScale: 1.5
+                });
                 if (window.canvasGenFocusPanel) window.canvasGenFocusPanel();
             }
         }
@@ -841,8 +908,15 @@ document.addEventListener('DOMContentLoaded', () => {
             tempCtx.fillStyle = frame.fill;
             tempCtx.fillRect(0, 0, outW, outH);
 
+            // Clip all drawing to frame bounds so overflow images don't bleed outside
+            tempCtx.save();
+            tempCtx.beginPath();
+            tempCtx.rect(0, 0, outW, outH);
+            tempCtx.clip();
+
             engine.elements.forEach(el => {
                 if (el === frame) return;
+                if (el.parentFrame !== frame) return; // only render direct frame children
                 if (el.x >= frame.x + frame.width || el.x + (el.width || 0) <= frame.x ||
                     el.y >= frame.y + frame.height || el.y + (el.height || 0) <= frame.y) return;
 
@@ -856,10 +930,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 tempCtx.save();
 
                 if (el.type === 'image' && el.image) {
-                    if (el === frameImage && el.image.naturalWidth === outW && el.image.naturalHeight === outH) {
-                        tempCtx.drawImage(el.image, 0, 0, outW, outH);
-                    } else {
-                        tempCtx.drawImage(el.image, 0, 0, el.image.naturalWidth, el.image.naturalHeight, sx, sy, sw, sh);
+                    // Always use source-rect drawImage so the clip region is respected
+                    // even when the image overflows the frame (localX/localY < 0).
+                    // Compute the portion of the *source* image that maps to the frame area:
+                    //   scaleImgX/Y = how many source pixels per canvas unit
+                    //   cropSrcX/Y  = first visible source pixel (offset when el.x < frame.x)
+                    const scaleImgX = el.image.naturalWidth  / (el.width  || 1);
+                    const scaleImgY = el.image.naturalHeight / (el.height || 1);
+                    // Intersection of image rect and frame rect in canvas space
+                    const visCanX = Math.max(el.x, frame.x) - frame.x;
+                    const visCanY = Math.max(el.y, frame.y) - frame.y;
+                    const visCanR = Math.min(el.x + (el.width  || 0), frame.x + frame.width)  - frame.x;
+                    const visCanB = Math.min(el.y + (el.height || 0), frame.y + frame.height) - frame.y;
+                    const visCanW = Math.max(0, visCanR - visCanX);
+                    const visCanH = Math.max(0, visCanB - visCanY);
+                    if (visCanW > 0 && visCanH > 0) {
+                        const cropSrcX = (Math.max(el.x, frame.x) - el.x) * scaleImgX;
+                        const cropSrcY = (Math.max(el.y, frame.y) - el.y) * scaleImgY;
+                        const cropSrcW = visCanW / (el.width  || 1) * el.image.naturalWidth;
+                        const cropSrcH = visCanH / (el.height || 1) * el.image.naturalHeight;
+                        tempCtx.drawImage(
+                            el.image,
+                            cropSrcX, cropSrcY, cropSrcW, cropSrcH,
+                            visCanX * scaleX, visCanY * scaleY,
+                            visCanW * scaleX, visCanH * scaleY
+                        );
                     }
                 } else if (el.type === 'text') {
                     tempCtx.font = `${(el.fontSize || 14) * scaleY}px ${el.fontFamily || 'Inter'}`;
@@ -896,6 +991,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 tempCtx.restore();
             });
+
+            // Restore the frame clip
+            tempCtx.restore();
 
             const link = document.createElement('a');
             link.download = `${frame.name || 'frame'}.png`;

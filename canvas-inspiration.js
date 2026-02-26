@@ -180,6 +180,17 @@
         const panel = document.getElementById('inspiration-panel');
         const sidebarBtn = document.querySelector('.sidebar-btn[data-action="inspiration"]');
 
+        // Close layers panel if open (mutual exclusion — sidebar is a tab switcher)
+        const layersPanel = document.getElementById('layers-panel');
+        if (layersPanel && !layersPanel.classList.contains('hidden')) {
+            layersPanel.classList.add('hidden');
+            document.body.classList.remove('layers-open');
+            const layersBtn = document.querySelector('.sidebar-btn[data-action="layers"]');
+            if (layersBtn) layersBtn.classList.remove('active');
+        }
+        // Clear all other sidebar active states first
+        document.querySelectorAll('.sidebar-btn').forEach(b => b.classList.remove('active'));
+
         panel.classList.remove('hidden');
         inspState.isOpen = true;
         document.body.classList.add('insp-open');
@@ -468,7 +479,7 @@
             id: photo.id,
             source: 'unsplash',
             thumbUrl: photo.urls?.small || photo.urls?.thumb,
-            fullUrl: photo.urls?.full || photo.urls?.regular,  // Prefer full resolution
+            fullUrl: photo.urls?.regular || photo.urls?.small,  // regular ~1080px, loads fast
             width: photo.width,
             height: photo.height,
             alt: photo.alt_description || photo.description || '',
@@ -594,16 +605,7 @@
             const selectedFrame = engine.selectedElements.find(el => el.type === 'frame');
 
             if (selectedFrame) {
-                // Replace existing images inside the frame (not stack)
-                const oldChildren = engine.elements.filter(
-                    el => el.parentFrame === selectedFrame && el.type === 'image'
-                );
-                oldChildren.forEach(child => {
-                    const idx = engine.elements.indexOf(child);
-                    if (idx !== -1) engine.elements.splice(idx, 1);
-                });
-
-                // Fit new image to cover the frame
+                // Add image into frame (cover-fit, centered) — keep existing children
                 const frameAspect = selectedFrame.width / selectedFrame.height;
                 const imgAspect = img.naturalWidth / img.naturalHeight;
 
@@ -617,9 +619,17 @@
                 x = selectedFrame.x + (selectedFrame.width - w) / 2;
                 y = selectedFrame.y + (selectedFrame.height - h) / 2;
             } else {
-                // Place at next grid position (8-col, 30px gap)
+                // Place at next grid position (8-col, 30px gap).
+                // Cap resolution to ~2K (2048px on the long side) to keep the canvas
+                // performant — very large source images (4K, 8K) would slow rendering.
+                const MAX_SIDE = 2048;
                 w = img.naturalWidth;
                 h = img.naturalHeight;
+                if (w > MAX_SIDE || h > MAX_SIDE) {
+                    const scale = MAX_SIDE / Math.max(w, h);
+                    w = Math.round(w * scale);
+                    h = Math.round(h * scale);
+                }
 
                 const pos = engine.getNextGridPosition(w, h, 30);
                 x = pos.x;
@@ -652,6 +662,11 @@
 
             if (engine.onSelectionChange) {
                 engine.onSelectionChange(engine.selectedElements);
+            }
+
+            // Auto-describe image for layer naming
+            if (window.GenPanel && window.GenPanel.describeImageElement) {
+                window.GenPanel.describeImageElement(element);
             }
         };
 
@@ -689,6 +704,12 @@
             if (toast.parentNode) toast.remove();
         }, 3000);
     }
+
+    // Expose public API for cross-panel coordination
+    window.InspPanel = {
+        close: closePanel,
+        isOpen: () => inspState.isOpen,
+    };
 
     // ==================== Bootstrap ====================
     function waitForEngine() {
