@@ -3464,3 +3464,6 @@ class CanvasEngine {
         return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 0 24, crosshair`;
     }
 }
+
+// Expose globally for canvas.js (new CanvasEngine(...))
+window.CanvasEngine = CanvasEngine;
