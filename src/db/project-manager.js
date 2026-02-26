@@ -361,9 +361,13 @@ const CloudProjectManager = {
         if (_isCloud) {
             try {
                 await _cloudSave(_userId, id, name, elements, viewport, canvasEl);
+                window.dispatchEvent(new CustomEvent('pm:save', { detail: { ok: true, cloud: true } }));
                 return true;
             } catch (e) {
-                console.warn('[ProjectManager] Cloud save failed, falling back to local:', e);
+                const msg = e?.message || String(e);
+                const code = e?.code || e?.status || '';
+                console.error('[ProjectManager] Cloud save FAILED. userId:', _userId, '| error:', msg, '| code:', code, '| full:', e);
+                window.dispatchEvent(new CustomEvent('pm:save', { detail: { ok: false, cloud: true, error: msg, code } }));
             }
         }
         if (window._localProjectManager) {

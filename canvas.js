@@ -1158,7 +1158,52 @@ document.addEventListener('DOMContentLoaded', () => {
             if (loginBtn) loginBtn.style.display = '';
             if (avatarWrap) avatarWrap.style.display = 'none';
         }
+
+        // Update save mode badge
+        _updateSaveModeBadge(loggedIn);
     }
+
+    // ── Save status badge ────────────────────────────────────────────────────
+    function _updateSaveModeBadge(isLoggedIn) {
+        let badge = document.getElementById('save-mode-badge');
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.id = 'save-mode-badge';
+            badge.style.cssText = [
+                'position:fixed', 'bottom:12px', 'right:12px', 'z-index:9999',
+                'padding:4px 10px', 'border-radius:20px', 'font-size:11px',
+                'font-family:Inter,sans-serif', 'pointer-events:none',
+                'transition:opacity .3s', 'opacity:0.85',
+            ].join(';');
+            document.body.appendChild(badge);
+        }
+        if (isLoggedIn) {
+            badge.style.background = '#1a6b3c';
+            badge.style.color = '#90f0b8';
+            badge.textContent = '☁ Cloud';
+        } else {
+            badge.style.background = '#4a3800';
+            badge.style.color = '#ffd066';
+            badge.textContent = '⚠ Local only — sign in to save to cloud';
+        }
+    }
+
+    // Listen for pm:save events from project-manager
+    window.addEventListener('pm:save', (e) => {
+        const { ok, error, code } = e.detail;
+        const badge = document.getElementById('save-mode-badge');
+        if (!badge) return;
+        if (ok) {
+            badge.style.background = '#1a6b3c';
+            badge.style.color = '#90f0b8';
+            badge.textContent = '☁ Saved';
+        } else {
+            badge.style.background = '#6b1a1a';
+            badge.style.color = '#f09090';
+            badge.textContent = `✗ Save failed (${code || error})`;
+            console.error('[Canvas] Cloud save failed. Check console for [ProjectManager] error above.');
+        }
+    });
 
     // Header auth button wiring (same IDs as index.html)
     const headerLoginBtn = document.getElementById('header-login-btn');
