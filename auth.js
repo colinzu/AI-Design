@@ -9,23 +9,21 @@
 // Note: Supabase anon keys are safe to commit — they are public-facing by design
 //       and only have access controlled by Row Level Security (RLS) policies.
 
-import { createClient } from '@supabase/supabase-js';
+import { supabase as _supabaseClient } from './src/db/supabase.js';
 
-const SUPABASE_URL = 'https://lfluatmojhkzdywizmsm.supabase.co';
+const SUPABASE_URL      = 'https://lfluatmojhkzdywizmsm.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxmbHVhdG1vamhremR5d2l6bXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE0MzM1NDksImV4cCI6MjA4NzAwOTU0OX0.ivjN5x7ZNU8RXsTBLuA_oxBKHCPcRxStagyRAwrgy9w';
 
 // ==================== Supabase Client ====================
-let _supabase = null;
 
 function getSupabaseClient() {
-    if (_supabase) return _supabase;
-    _supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    return _supabase;
+    return _supabaseClient;
 }
 
 function isConfigured() {
-    return SUPABASE_URL !== 'YOUR_SUPABASE_PROJECT_URL' &&
-           SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY';
+    // True as long as the constants hold real (non-placeholder) values
+    return SUPABASE_URL.startsWith('https://') &&
+           SUPABASE_ANON_KEY.length > 20;
 }
 
 // ==================== Cross-tab Broadcast ====================

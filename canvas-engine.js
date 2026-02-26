@@ -2718,6 +2718,74 @@ class CanvasEngine {
         if (this.onSelectionChange) {
             this.onSelectionChange(this.selectedElements);
         }
+
+        // Render remote collaborator cursors (Phase 5)
+        this._renderCollabCursors();
+    }
+
+    // ── Collaboration: render remote cursors on top of everything ────────────
+    _renderCollabCursors() {
+        if (!window.CollabManager) return;
+        const presence = window.CollabManager.getPresence();
+        if (!presence || !presence.size) return;
+
+        const ctx = this.ctx;
+        const dpr = this.dpr || 1;
+        ctx.save();
+        ctx.scale(dpr, dpr);
+
+        const now = Date.now();
+        for (const [userId, p] of presence) {
+            if (p.x === undefined || p.y === undefined) continue;
+            if (now - (p.updatedAt || 0) > 10000) continue; // stale after 10s
+
+            // Convert world → screen coordinates
+            const sx = p.x * this.viewport.scale + this.viewport.x;
+            const sy = p.y * this.viewport.scale + this.viewport.y;
+            if (sx < -20 || sx > (this.cssWidth || 1920) + 20) continue;
+            if (sy < -20 || sy > (this.cssHeight || 1080) + 20) continue;
+
+            const color = p.color || '#888888';
+
+            // Cursor arrow
+            ctx.save();
+            ctx.translate(sx, sy);
+            ctx.fillStyle    = color;
+            ctx.strokeStyle  = '#fff';
+            ctx.lineWidth    = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(0, 14);
+            ctx.lineTo(3.5, 10.5);
+            ctx.lineTo(6, 15);
+            ctx.lineTo(7.5, 14.5);
+            ctx.lineTo(5, 10);
+            ctx.lineTo(9, 10);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // Name label
+            const name = (p.displayName || 'User').slice(0, 20);
+            ctx.font      = 'bold 11px Inter, sans-serif';
+            const tw = ctx.measureText(name).width;
+            const px = 12, py = 16, pad = 4;
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.roundRect(px - pad, py - 11, tw + pad * 2, 16, 4);
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.fillText(name, px, py);
+            ctx.restore();
+        }
+        ctx.restore();
+    }
+
+    // ── Collaboration: apply a remote operation ───────────────────────────────
+    applyRemoteOp(op) {
+        if (window.CollabManager) {
+            window.CollabManager._applyRemoteOp?.(op);
+        }
     }
 
     drawGrid() {
