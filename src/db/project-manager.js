@@ -122,17 +122,65 @@ function _thumbnailFromElement(imgEl) {
 function _thumbnailFromCanvas(canvasEl) {
     try {
         if (!canvasEl) return null;
+        // Use canvasEngine viewport to crop the content area intelligently
+        const engine = window.canvasEngine;
         const cnv = document.createElement('canvas');
         cnv.width = THUMB_W; cnv.height = THUMB_H;
         const ctx = cnv.getContext('2d');
-        ctx.fillStyle = '#FFFFFF';
+        ctx.fillStyle = '#F4F5F7';
         ctx.fillRect(0, 0, THUMB_W, THUMB_H);
-        ctx.drawImage(canvasEl, 0, 0, THUMB_W, THUMB_H);
-        return cnv.toDataURL('image/jpeg', 0.7);
+
+        if (engine && engine.elements && engine.elements.length > 0) {
+            // Find bounding box of all elements in world coords
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const el of engine.elements) {
+                const x = el.x ?? 0, y = el.y ?? 0;
+                const w = el.width ?? el.size ?? 100;
+                const h = el.height ?? el.size ?? 100;
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, x + w);
+                maxY = Math.max(maxY, y + h);
+            }
+            const pad = 40;
+            minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+            const worldW = maxX - minX;
+            const worldH = maxY - minY;
+            if (worldW > 0 && worldH > 0) {
+                const dpr = window.devicePixelRatio || 1;
+                const scale = Math.min(THUMB_W / worldW, THUMB_H / worldH);
+                const drawW = worldW * scale;
+                const drawH = worldH * scale;
+                const offsetX = (THUMB_W - drawW) / 2;
+                const offsetY = (THUMB_H - drawH) / 2;
+                // Convert world bbox to canvas pixel coords
+                const vp = engine.viewport;
+                const srcX = (minX * vp.scale + vp.x) * dpr;
+                const srcY = (minY * vp.scale + vp.y) * dpr;
+                const srcW = worldW * vp.scale * dpr;
+                const srcH = worldH * vp.scale * dpr;
+                ctx.drawImage(canvasEl, srcX, srcY, srcW, srcH, offsetX, offsetY, drawW, drawH);
+                return cnv.toDataURL('image/jpeg', 0.8);
+            }
+        }
+        // Fallback: scale down the whole canvas
+        const srcAR = canvasEl.width / canvasEl.height;
+        const dstAR = THUMB_W / THUMB_H;
+        let sx = 0, sy = 0, sw = canvasEl.width, sh = canvasEl.height;
+        if (srcAR > dstAR) { sw = sh * dstAR; sx = (canvasEl.width - sw) / 2; }
+        else                { sh = sw / dstAR; sy = (canvasEl.height - sh) / 2; }
+        ctx.drawImage(canvasEl, sx, sy, sw, sh, 0, 0, THUMB_W, THUMB_H);
+        return cnv.toDataURL('image/jpeg', 0.8);
     } catch { return null; }
 }
 
 async function _generateThumbnailDataUrl(elements, canvasEl) {
+    // Prefer canvas snapshot — it reflects actual rendered state including shapes, text, AI images
+    if (canvasEl) {
+        const t = _thumbnailFromCanvas(canvasEl);
+        if (t) return t;
+    }
+    // Fallback: use first image element's src
     for (let i = elements.length - 1; i >= 0; i--) {
         const el = elements[i];
         if (el.type !== 'image') continue;
@@ -148,7 +196,7 @@ async function _generateThumbnailDataUrl(elements, canvasEl) {
             if (t) return t;
         }
     }
-    return canvasEl ? _thumbnailFromCanvas(canvasEl) : null;
+    return null;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -174,7 +222,11 @@ async function _uploadThumbnail(projectId, dataUrl, accessToken) {
                 body: blob,
             },
         );
-        if (!res.ok) return null;
+        if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            console.warn('[ProjectManager] Storage upload failed:', res.status, e);
+            return null;
+        }
         return `${SUPABASE_URL}/storage/v1/object/public/project-thumbnails/${path}`;
     } catch { return null; }
 }
@@ -374,9 +426,10 @@ async function _cloudSave(userId, id, name, elements, viewport, canvasEl) {
 
     // ── 4. Thumbnail (background, non-blocking) ──────────────────────
     if (thumbnailDataUrl) {
-        _uploadThumbnail(id, thumbnailDataUrl, token).then(url => {
-            if (!url) return;
-            fetch(`${SUPABASE_URL}/rest/v1/projects?id=eq.${id}`, {
+        _uploadThumbnail(id, thumbnailDataUrl, token).then(async url => {
+            if (!url) { console.warn('[ProjectManager] Thumbnail upload returned null — check storage RLS policies'); return; }
+            console.log('[ProjectManager] Thumbnail uploaded:', url);
+            const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/projects?id=eq.${id}`, {
                 method: 'PATCH',
                 headers: {
                     'apikey':        SUPABASE_ANON_KEY,
@@ -385,8 +438,12 @@ async function _cloudSave(userId, id, name, elements, viewport, canvasEl) {
                     'Prefer':        'return=minimal',
                 },
                 body: JSON.stringify({ thumbnail_url: url }),
-            }).catch(() => {});
-        });
+            });
+            if (!patchRes.ok) {
+                const e = await patchRes.json().catch(() => ({}));
+                console.warn('[ProjectManager] thumbnail_url PATCH failed:', patchRes.status, e);
+            }
+        }).catch(e => console.warn('[ProjectManager] Thumbnail upload error:', e));
     }
 }
 
@@ -496,6 +553,18 @@ const CloudProjectManager = {
                 const msg = e?.message || String(e);
                 const code = e?.code || e?.status || '';
                 console.error('[ProjectManager] Cloud save FAILED. userId:', _userId, '| error:', msg, '| code:', code, '| full:', e);
+                // Fallback to local IndexedDB so user does not lose work
+                if (window._localProjectManager) {
+                    try {
+                        await window._localProjectManager.save(id, name, elements, viewport, canvasEl);
+                        window.dispatchEvent(new CustomEvent('pm:save', {
+                            detail: { ok: true, cloud: false, localFallback: true, error: msg, code }
+                        }));
+                        return true;
+                    } catch (localErr) {
+                        console.warn('[ProjectManager] Local fallback also failed:', localErr);
+                    }
+                }
                 window.dispatchEvent(new CustomEvent('pm:save', { detail: { ok: false, cloud: true, error: msg, code } }));
             }
         }
@@ -508,7 +577,12 @@ const CloudProjectManager = {
     saveAndForget(id, name, elements, viewport) {
         // Best-effort fire-and-forget (used in beforeunload)
         if (_isCloud) {
-            _cloudSave(_userId, id, name, elements, viewport, null).catch(() => {});
+            _cloudSave(_userId, id, name, elements, viewport, null).catch(() => {
+                // Fallback to local when cloud fails (e.g. RLS 42501)
+                if (window._localProjectManager) {
+                    window._localProjectManager.saveAndForget(id, name, elements, viewport);
+                }
+            });
         }
         if (window._localProjectManager) {
             window._localProjectManager.saveAndForget(id, name, elements, viewport);

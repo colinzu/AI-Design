@@ -1360,16 +1360,13 @@ function showAuthError(message) {
 
 function updateRecentsVisibility() {
     const recentsGrid = document.getElementById('recents-grid');
+    const placeholder = document.getElementById('recents-placeholder');
     if (!recentsGrid) return;
-    if (isLoggedIn) {
-        recentsGrid.style.display = '';
-        const placeholder = document.getElementById('recents-placeholder');
-        if (placeholder) placeholder.style.display = 'none';
-    } else {
-        recentsGrid.style.display = 'none';
-        const placeholder = document.getElementById('recents-placeholder');
-        if (placeholder) placeholder.style.display = 'flex';
-    }
+
+    // Always show the recents grid — guest users can have local IndexedDB projects.
+    // initializeProjectCards() handles the empty-state message when there are none.
+    recentsGrid.style.display = '';
+    if (placeholder) placeholder.style.display = 'none';
 }
 
 function isValidEmail(email) {
