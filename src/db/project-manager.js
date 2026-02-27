@@ -250,43 +250,119 @@ async function _restUpsert(table, conflictCol, body, accessToken) {
 }
 
 async function _cloudSave(userId, id, name, elements, viewport, canvasEl) {
-    // getSession() refreshes an expired access_token automatically using the
-    // stored refresh_token.  We then pass the raw access_token straight into
-    // the Authorization header via _restUpsert(), bypassing the Supabase JS
-    // client's internal state machine — which can silently fall back to the
-    // anon key when its in-memory session is out-of-sync with localStorage.
+    // ── 1. Get session ───────────────────────────────────────────────
     const { data: { session }, error: sessErr } = await supabase.auth.getSession();
     if (sessErr || !session) {
-        const err = new Error(sessErr?.message || 'Session expired — please sign in again');
-        err.code = sessErr?.status || 'NO_SESSION';
-        throw err;
+        throw Object.assign(
+            new Error(sessErr?.message || 'Session expired — please sign in again'),
+            { code: 'NO_SESSION' },
+        );
     }
 
-    const token          = session.access_token;
-    const verifiedUserId = session.user.id;
+    const token = session.access_token;
 
-    const serialized  = _serializeElements(elements);
-    const frameCount  = elements.filter(el => el.type === 'frame').length;
+    // ── 2. Decode + validate JWT claims client-side ──────────────────
+    // JWTs use base64url encoding (- and _ instead of + and /).
+    let jwtClaims;
+    try {
+        const b64url = token.split('.')[1];
+        const b64    = b64url.replace(/-/g, '+').replace(/_/g, '/');
+        jwtClaims    = JSON.parse(atob(b64));
+    } catch {
+        throw Object.assign(
+            new Error('Malformed access token — please sign out and sign in again'),
+            { code: 'BAD_JWT' },
+        );
+    }
+
+    const { role: jwtRole, sub: jwtSub } = jwtClaims;
+    console.log(
+        '[ProjectManager] JWT — role:', jwtRole,
+        '| sub:', jwtSub,
+        '| exp:', jwtClaims.exp ? new Date(jwtClaims.exp * 1000).toISOString() : 'n/a',
+    );
+
+    if (jwtRole !== 'authenticated') {
+        // Most likely the anon key ended up as access_token.
+        // The user must sign out and sign in again.
+        throw Object.assign(
+            new Error(
+                `JWT role="${jwtRole}" (expected "authenticated") — ` +
+                'please sign out and sign in again',
+            ),
+            { code: 'BAD_JWT_ROLE' },
+        );
+    }
+    if (!jwtSub) {
+        throw Object.assign(
+            new Error('JWT missing "sub" claim — please sign out and sign in again'),
+            { code: 'BAD_JWT_SUB' },
+        );
+    }
+
+    // Use the JWT's own sub claim as the authoritative user ID.
+    const verifiedUserId   = jwtSub;
+    const serialized       = _serializeElements(elements);
+    const frameCount       = elements.filter(el => el.type === 'frame').length;
     const thumbnailDataUrl = await _generateThumbnailDataUrl(elements, canvasEl);
 
-    // Upsert project metadata — explicit JWT, no Supabase client state involved
-    await _restUpsert('projects', 'id', {
-        id,
-        owner_id:    verifiedUserId,
-        name:        name || 'Untitled Project',
-        frame_count: frameCount,
-        viewport:    { x: viewport.x, y: viewport.y, scale: viewport.scale },
-        updated_at:  new Date().toISOString(),
-    }, token);
+    const authHeaders = {
+        'apikey':        SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${token}`,
+        'Content-Type':  'application/json',
+    };
 
-    // Upsert canvas elements
-    await _restUpsert('project_elements', 'project_id', {
-        project_id: id,
-        elements:   serialized,
-        updated_at: new Date().toISOString(),
-    }, token);
+    // ── 3. Call save_project RPC (SECURITY DEFINER, bypasses RLS) ───
+    // The function validates JWT claims server-side and gives detailed
+    // error messages if something is wrong with the token.
+    const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/save_project`, {
+        method:  'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+            p_id:          id,
+            p_owner_id:    verifiedUserId,
+            p_name:        name || 'Untitled Project',
+            p_frame_count: frameCount,
+            p_viewport:    { x: viewport.x, y: viewport.y, scale: viewport.scale },
+            p_elements:    serialized,
+        }),
+    });
 
-    // Upload thumbnail in background (non-blocking)
+    if (!rpcRes.ok) {
+        const rpcErr = await rpcRes.json().catch(() => ({}));
+
+        // PGRST202 = function not found (migration not yet applied).
+        // Fall back to the direct upsert so the app stays functional.
+        if (rpcRes.status === 404 || rpcErr.code === 'PGRST202') {
+            console.warn(
+                '[ProjectManager] save_project RPC not found — ' +
+                'please run supabase/migrations/003_save_project_fn.sql in Supabase SQL Editor. ' +
+                'Falling back to direct upsert.',
+            );
+            await _restUpsert('projects', 'id', {
+                id,
+                owner_id:    verifiedUserId,
+                name:        name || 'Untitled Project',
+                frame_count: frameCount,
+                viewport:    { x: viewport.x, y: viewport.y, scale: viewport.scale },
+                updated_at:  new Date().toISOString(),
+            }, token);
+            await _restUpsert('project_elements', 'project_id', {
+                project_id: id,
+                elements:   serialized,
+                updated_at: new Date().toISOString(),
+            }, token);
+        } else {
+            // Any other error (auth failure, DB error, etc.) — throw with details.
+            const err  = new Error(rpcErr.message || `save_project RPC HTTP ${rpcRes.status}`);
+            err.code   = rpcErr.code   || String(rpcRes.status);
+            err.status = rpcRes.status;
+            err.hint   = rpcErr.hint;
+            throw err;
+        }
+    }
+
+    // ── 4. Thumbnail (background, non-blocking) ──────────────────────
     if (thumbnailDataUrl) {
         _uploadThumbnail(id, thumbnailDataUrl).then(url => {
             if (url) {
