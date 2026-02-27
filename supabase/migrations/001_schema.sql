@@ -117,7 +117,7 @@ create table if not exists public.project_members (
 create table if not exists public.share_links (
     id         uuid primary key default gen_random_uuid(),
     project_id uuid not null references public.projects(id) on delete cascade,
-    token      text unique not null default encode(gen_random_bytes(24), 'base64url'),
+    token      text unique not null default encode(gen_random_bytes(24), 'hex'),
     role       text not null default 'viewer' check (role in ('viewer', 'editor')),
     expires_at timestamptz,
     created_by uuid references auth.users(id),
