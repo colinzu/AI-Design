@@ -224,13 +224,24 @@ async function _cloudSave(userId, id, name, elements, viewport, canvasEl) {
     // Ensure the JWT is fresh (getSession auto-refreshes expired tokens).
     // Without this, a stale/expired access token causes auth.uid() to return
     // null server-side → RLS policy "projects_insert" rejects the INSERT (42501).
+    // getSession() reads localStorage and auto-refreshes if the access token is
+    // expired.  However, the Supabase client's *internal* currentSession can be
+    // out-of-sync (e.g., the singleton was created before a session existed).
+    // setSession() explicitly writes the token back into the client's in-memory
+    // state so the HTTP Authorization header is included in every subsequent call.
     const { data: { session }, error: sessErr } = await supabase.auth.getSession();
     if (sessErr || !session) {
         const err = new Error(sessErr?.message || 'Session expired — please sign in again');
         err.code = sessErr?.status || 'NO_SESSION';
         throw err;
     }
-    // Use the verified ID from the live session (not the locally-cached _userId)
+    // Force-sync the token into the client's in-memory state.
+    // If the access_token is still valid this is a cheap local operation;
+    // if it has expired, setSession will refresh it via the refresh_token.
+    await supabase.auth.setSession({
+        access_token:  session.access_token,
+        refresh_token: session.refresh_token,
+    });
     const verifiedUserId = session.user.id;
 
     const serialized  = _serializeElements(elements);
