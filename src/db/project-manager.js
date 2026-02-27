@@ -122,65 +122,18 @@ function _thumbnailFromElement(imgEl) {
 function _thumbnailFromCanvas(canvasEl) {
     try {
         if (!canvasEl) return null;
-        // Use canvasEngine viewport to crop the content area intelligently
-        const engine = window.canvasEngine;
         const cnv = document.createElement('canvas');
         cnv.width = THUMB_W; cnv.height = THUMB_H;
         const ctx = cnv.getContext('2d');
-        ctx.fillStyle = '#F4F5F7';
+        ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, THUMB_W, THUMB_H);
-
-        if (engine && engine.elements && engine.elements.length > 0) {
-            // Find bounding box of all elements in world coords
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (const el of engine.elements) {
-                const x = el.x ?? 0, y = el.y ?? 0;
-                const w = el.width ?? el.size ?? 100;
-                const h = el.height ?? el.size ?? 100;
-                minX = Math.min(minX, x);
-                minY = Math.min(minY, y);
-                maxX = Math.max(maxX, x + w);
-                maxY = Math.max(maxY, y + h);
-            }
-            const pad = 40;
-            minX -= pad; minY -= pad; maxX += pad; maxY += pad;
-            const worldW = maxX - minX;
-            const worldH = maxY - minY;
-            if (worldW > 0 && worldH > 0) {
-                const dpr = window.devicePixelRatio || 1;
-                const scale = Math.min(THUMB_W / worldW, THUMB_H / worldH);
-                const drawW = worldW * scale;
-                const drawH = worldH * scale;
-                const offsetX = (THUMB_W - drawW) / 2;
-                const offsetY = (THUMB_H - drawH) / 2;
-                // Convert world bbox to canvas pixel coords
-                const vp = engine.viewport;
-                const srcX = (minX * vp.scale + vp.x) * dpr;
-                const srcY = (minY * vp.scale + vp.y) * dpr;
-                const srcW = worldW * vp.scale * dpr;
-                const srcH = worldH * vp.scale * dpr;
-                ctx.drawImage(canvasEl, srcX, srcY, srcW, srcH, offsetX, offsetY, drawW, drawH);
-                return cnv.toDataURL('image/jpeg', 0.8);
-            }
-        }
-        // Fallback: scale down the whole canvas
-        const srcAR = canvasEl.width / canvasEl.height;
-        const dstAR = THUMB_W / THUMB_H;
-        let sx = 0, sy = 0, sw = canvasEl.width, sh = canvasEl.height;
-        if (srcAR > dstAR) { sw = sh * dstAR; sx = (canvasEl.width - sw) / 2; }
-        else                { sh = sw / dstAR; sy = (canvasEl.height - sh) / 2; }
-        ctx.drawImage(canvasEl, sx, sy, sw, sh, 0, 0, THUMB_W, THUMB_H);
-        return cnv.toDataURL('image/jpeg', 0.8);
+        ctx.drawImage(canvasEl, 0, 0, THUMB_W, THUMB_H);
+        return cnv.toDataURL('image/jpeg', 0.7);
     } catch { return null; }
 }
 
 async function _generateThumbnailDataUrl(elements, canvasEl) {
-    // Prefer canvas snapshot — it reflects actual rendered state including shapes, text, AI images
-    if (canvasEl) {
-        const t = _thumbnailFromCanvas(canvasEl);
-        if (t) return t;
-    }
-    // Fallback: use first image element's src
+    // Prefer last image element (mirrors original canvas-project.js logic)
     for (let i = elements.length - 1; i >= 0; i--) {
         const el = elements[i];
         if (el.type !== 'image') continue;
@@ -196,7 +149,8 @@ async function _generateThumbnailDataUrl(elements, canvasEl) {
             if (t) return t;
         }
     }
-    return null;
+    // Fallback: canvas screenshot
+    return canvasEl ? _thumbnailFromCanvas(canvasEl) : null;
 }
 
 // ────────────────────────────────────────────────────────────────────
