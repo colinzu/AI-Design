@@ -140,6 +140,7 @@ async function _generateThumbnailDataUrl(elements, canvasEl) {
         if (el.src) {
             const t = await new Promise(resolve => {
                 const img = new Image();
+                if (!el.src.startsWith('data:')) img.crossOrigin = 'anonymous';
                 img.onload  = () => resolve(_thumbnailFromElement(img));
                 img.onerror = () => resolve(null);
                 img.src = el.src;
@@ -155,17 +156,26 @@ async function _generateThumbnailDataUrl(elements, canvasEl) {
 // Returns a public URL or null on failure.
 // ────────────────────────────────────────────────────────────────────
 
-async function _uploadThumbnail(projectId, dataUrl) {
-    if (!dataUrl) return null;
+async function _uploadThumbnail(projectId, dataUrl, accessToken) {
+    if (!dataUrl || !accessToken) return null;
     try {
         const blob = await (await fetch(dataUrl)).blob();
         const path = `${projectId}.jpg`;
-        const { error } = await supabase.storage
-            .from('project-thumbnails')
-            .upload(path, blob, { upsert: true, contentType: 'image/jpeg' });
-        if (error) return null;
-        const { data } = supabase.storage.from('project-thumbnails').getPublicUrl(path);
-        return data?.publicUrl ?? null;
+        const res = await fetch(
+            `${SUPABASE_URL}/storage/v1/object/project-thumbnails/${path}`,
+            {
+                method: 'POST',
+                headers: {
+                    'apikey':        SUPABASE_ANON_KEY,
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type':  'image/jpeg',
+                    'x-upsert':      'true',
+                },
+                body: blob,
+            },
+        );
+        if (!res.ok) return null;
+        return `${SUPABASE_URL}/storage/v1/object/public/project-thumbnails/${path}`;
     } catch { return null; }
 }
 
@@ -364,13 +374,18 @@ async function _cloudSave(userId, id, name, elements, viewport, canvasEl) {
 
     // ── 4. Thumbnail (background, non-blocking) ──────────────────────
     if (thumbnailDataUrl) {
-        _uploadThumbnail(id, thumbnailDataUrl).then(url => {
-            if (url) {
-                supabase.from('projects')
-                    .update({ thumbnail_url: url })
-                    .eq('id', id)
-                    .then(() => {});
-            }
+        _uploadThumbnail(id, thumbnailDataUrl, token).then(url => {
+            if (!url) return;
+            fetch(`${SUPABASE_URL}/rest/v1/projects?id=eq.${id}`, {
+                method: 'PATCH',
+                headers: {
+                    'apikey':        SUPABASE_ANON_KEY,
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type':  'application/json',
+                    'Prefer':        'return=minimal',
+                },
+                body: JSON.stringify({ thumbnail_url: url }),
+            }).catch(() => {});
         });
     }
 }
