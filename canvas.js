@@ -1483,4 +1483,3 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
 });  // end DOMContentLoaded
-
