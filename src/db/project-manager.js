@@ -11,7 +11,7 @@
  * Runs AFTER canvas-project.js in the module load order; overrides window.ProjectManager.
  */
 
-import { supabase } from './supabase.js';
+import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from './supabase.js';
 
 const THUMB_W = 320;
 const THUMB_H = 200;
@@ -220,56 +220,71 @@ async function _cloudLoad(projectId) {
     };
 }
 
+/**
+ * Low-level PostgREST upsert using raw fetch so the Authorization header is
+ * always the caller-supplied JWT — no dependency on the Supabase client's
+ * internal session state (which can be null when the singleton was created
+ * before a session was established, causing silent anon-key fallback → 42501).
+ */
+async function _restUpsert(table, conflictCol, body, accessToken) {
+    const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/${table}?on_conflict=${conflictCol}`,
+        {
+            method:  'POST',
+            headers: {
+                'apikey':        SUPABASE_ANON_KEY,
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type':  'application/json',
+                'Prefer':        'return=minimal,resolution=merge-duplicates',
+            },
+            body: JSON.stringify(body),
+        },
+    );
+    if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        const err = new Error(payload.message || `HTTP ${res.status} on ${table}`);
+        err.code   = payload.code   || String(res.status);
+        err.status = res.status;
+        throw err;
+    }
+}
+
 async function _cloudSave(userId, id, name, elements, viewport, canvasEl) {
-    // Ensure the JWT is fresh (getSession auto-refreshes expired tokens).
-    // Without this, a stale/expired access token causes auth.uid() to return
-    // null server-side → RLS policy "projects_insert" rejects the INSERT (42501).
-    // getSession() reads localStorage and auto-refreshes if the access token is
-    // expired.  However, the Supabase client's *internal* currentSession can be
-    // out-of-sync (e.g., the singleton was created before a session existed).
-    // setSession() explicitly writes the token back into the client's in-memory
-    // state so the HTTP Authorization header is included in every subsequent call.
+    // getSession() refreshes an expired access_token automatically using the
+    // stored refresh_token.  We then pass the raw access_token straight into
+    // the Authorization header via _restUpsert(), bypassing the Supabase JS
+    // client's internal state machine — which can silently fall back to the
+    // anon key when its in-memory session is out-of-sync with localStorage.
     const { data: { session }, error: sessErr } = await supabase.auth.getSession();
     if (sessErr || !session) {
         const err = new Error(sessErr?.message || 'Session expired — please sign in again');
         err.code = sessErr?.status || 'NO_SESSION';
         throw err;
     }
-    // Force-sync the token into the client's in-memory state.
-    // If the access_token is still valid this is a cheap local operation;
-    // if it has expired, setSession will refresh it via the refresh_token.
-    await supabase.auth.setSession({
-        access_token:  session.access_token,
-        refresh_token: session.refresh_token,
-    });
+
+    const token          = session.access_token;
     const verifiedUserId = session.user.id;
 
     const serialized  = _serializeElements(elements);
     const frameCount  = elements.filter(el => el.type === 'frame').length;
     const thumbnailDataUrl = await _generateThumbnailDataUrl(elements, canvasEl);
 
-    // Upsert project metadata
-    const { error: projErr } = await supabase
-        .from('projects')
-        .upsert({
-            id,
-            owner_id:    verifiedUserId,
-            name:        name || 'Untitled Project',
-            frame_count: frameCount,
-            viewport:    { x: viewport.x, y: viewport.y, scale: viewport.scale },
-            updated_at:  new Date().toISOString(),
-        }, { onConflict: 'id' });
-    if (projErr) throw projErr;
+    // Upsert project metadata — explicit JWT, no Supabase client state involved
+    await _restUpsert('projects', 'id', {
+        id,
+        owner_id:    verifiedUserId,
+        name:        name || 'Untitled Project',
+        frame_count: frameCount,
+        viewport:    { x: viewport.x, y: viewport.y, scale: viewport.scale },
+        updated_at:  new Date().toISOString(),
+    }, token);
 
     // Upsert canvas elements
-    const { error: elemErr } = await supabase
-        .from('project_elements')
-        .upsert({
-            project_id: id,
-            elements:   serialized,
-            updated_at: new Date().toISOString(),
-        }, { onConflict: 'project_id' });
-    if (elemErr) throw elemErr;
+    await _restUpsert('project_elements', 'project_id', {
+        project_id: id,
+        elements:   serialized,
+        updated_at: new Date().toISOString(),
+    }, token);
 
     // Upload thumbnail in background (non-blocking)
     if (thumbnailDataUrl) {
